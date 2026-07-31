@@ -1,190 +1,2277 @@
-import { Telegraf, Markup, type Context } from 'telegraf';
-import { config } from './config.js';
-import { db, many, one } from './db.js';
-import { admin as adminKb, back, home } from './ui.js';
+import { Telegraf, Markup, type Context } from "telegraf";
+import { config } from "./config.js";
+import { db, many, one } from "./db.js";
+import { admin as adminKb, back, home } from "./ui.js";
 
 const bot = new Telegraf(config.BOT_TOKEN);
-type Campaign = {id:number,title:string,description:string,media_file_id:string|null,media_type:string|null,access_type:'free'|'paid'|'invite',target:number|null,gofile_url:string,price_text:string|null,status:string,release_version:number,content_status:string,link_expires_at:Date|null,message_id:number|null,deleted_at:Date|null};
-type Ad = {id:number,name:string,body:string,media_file_id:string|null,media_type:string|null,enabled:boolean,last_sent_at:Date|null};
-const esc=(s:string)=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]!));
-async function isAdminUser(id?:number){if(!id)return false;try{const member=await bot.telegram.getChatMember(config.MAIN_GROUP_ID,id);return member.status==='administrator'||member.status==='creator'}catch{return false}}
-async function adminIds(){try{return (await bot.telegram.getChatAdministrators(config.MAIN_GROUP_ID)).filter(x=>!x.user.is_bot).map(x=>x.user.id)}catch{return []}}
-async function audit(adminId:number,action:string,campaignId?:number|null,details:Record<string,unknown>={}){await db.query(`INSERT INTO admin_audit_logs(admin_id,campaign_id,action,details) VALUES($1,$2,$3,$4::jsonb)`,[adminId,campaignId??null,action,JSON.stringify(details)])}
-async function ensureUser(ctx:Context){ if(!ctx.from)return; await db.query(`INSERT INTO users(telegram_id,username,first_name) VALUES($1,$2,$3) ON CONFLICT(telegram_id) DO UPDATE SET username=$2,first_name=$3,updated_at=now()`,[ctx.from.id,ctx.from.username??null,ctx.from.first_name]);if(ctx.chat?.type==='private')await db.query(`UPDATE group_members SET started_bot=TRUE,updated_at=now() WHERE user_id=$1`,[ctx.from.id]); }
-async function showHome(ctx:Context,text='Bienvenue. Choisis une option :'){ await ensureUser(ctx); const x={parse_mode:'HTML' as const,...home(await isAdminUser(ctx.from?.id))}; try{await ctx.editMessageText(text,x)}catch{await ctx.reply(text,x)} }
-async function privateOnly(ctx:Context){if(ctx.chat?.type!=='private'){await ctx.answerCbQuery?.('Ouvre le bot en privé.');return false}return true}
-async function getOrCreateLink(userId:number){
- let row=await one<{invite_link:string}>(`SELECT invite_link FROM invite_links WHERE owner_id=$1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`,[userId]);
- if(row)return row.invite_link;
- const link=await bot.telegram.createChatInviteLink(config.MAIN_GROUP_ID,{name:`ref_${userId}_${Date.now()}`,creates_join_request:false});
- await db.query(`INSERT INTO invite_links(owner_id,invite_link,telegram_link_name) VALUES($1,$2,$3)`,[userId,link.invite_link,link.name]); return link.invite_link;
+type Campaign = {
+  id: number;
+  title: string;
+  description: string;
+  media_file_id: string | null;
+  media_type: string | null;
+  access_type: "free" | "paid" | "invite";
+  target: number | null;
+  gofile_url: string;
+  price_text: string | null;
+  status: string;
+  release_version: number;
+  content_status: string;
+  link_expires_at: Date | null;
+  message_id: number | null;
+  deleted_at: Date | null;
+};
+type Ad = {
+  id: number;
+  name: string;
+  body: string;
+  media_file_id: string | null;
+  media_type: string | null;
+  enabled: boolean;
+  last_sent_at: Date | null;
+};
+const esc = (s: string) =>
+  s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
+async function isAdminUser(id?: number) {
+  if (!id) return false;
+  try {
+    const member = await bot.telegram.getChatMember(config.MAIN_GROUP_ID, id);
+    return member.status === "administrator" || member.status === "creator";
+  } catch {
+    return false;
+  }
 }
-async function publish(c:Campaign){
- const type=c.access_type==='free'?'GRATUIT':c.access_type==='paid'?'PAYANT':`INVITATION · ${c.target} personnes`;
- const caption=`<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n<b>Accès :</b> ${type}`;
- const kb=Markup.inlineKeyboard([[Markup.button.url('🔓 Obtenir l’accès',`https://t.me/${(await bot.telegram.getMe()).username}?start=c_${c.id}`)]]);
- let msg;
- if(c.media_file_id&&c.media_type==='photo')msg=await bot.telegram.sendPhoto(config.MAIN_GROUP_ID,c.media_file_id,{caption,parse_mode:'HTML',...kb});
- else if(c.media_file_id&&c.media_type==='video')msg=await bot.telegram.sendVideo(config.MAIN_GROUP_ID,c.media_file_id,{caption,parse_mode:'HTML',...kb});
- else msg=await bot.telegram.sendMessage(config.MAIN_GROUP_ID,caption,{parse_mode:'HTML',...kb});
- await db.query(`UPDATE campaigns SET status='published',message_id=$2,published_at=now() WHERE id=$1`,[c.id,msg.message_id]);
+async function adminIds() {
+  try {
+    return (await bot.telegram.getChatAdministrators(config.MAIN_GROUP_ID))
+      .filter((x) => !x.user.is_bot)
+      .map((x) => x.user.id);
+  } catch {
+    return [];
+  }
 }
-async function removeAnnouncement(c:Campaign){if(c.message_id)await bot.telegram.deleteMessage(config.MAIN_GROUP_ID,c.message_id).catch(()=>{});await db.query(`UPDATE campaigns SET message_id=NULL WHERE id=$1`,[c.id])}
-async function sendContent(chatId:number,body:string,fileId?:string|null,mediaType?:string|null){
- if(fileId&&mediaType==='photo')return bot.telegram.sendPhoto(chatId,fileId,{caption:body});
- if(fileId&&mediaType==='video')return bot.telegram.sendVideo(chatId,fileId,{caption:body});
- return bot.telegram.sendMessage(chatId,body);
+async function audit(
+  adminId: number,
+  action: string,
+  campaignId?: number | null,
+  details: Record<string, unknown> = {},
+) {
+  await db.query(
+    `INSERT INTO admin_audit_logs(admin_id,campaign_id,action,details) VALUES($1,$2,$3,$4::jsonb)`,
+    [adminId, campaignId ?? null, action, JSON.stringify(details)],
+  );
 }
-async function runBroadcast(target:'group'|'users',body:string,fileId?:string|null,mediaType?:string|null){
- if(target==='group'){await sendContent(config.MAIN_GROUP_ID,body,fileId,mediaType);return {sent:1,failed:0}}
- const users=await many<{telegram_id:string}>('SELECT telegram_id FROM users ORDER BY telegram_id');let sent=0,failed=0;
- for(const u of users){try{await sendContent(Number(u.telegram_id),body,fileId,mediaType);sent++}catch{failed++}await new Promise(r=>setTimeout(r,40))}
- return {sent,failed};
+async function ensureUser(ctx: Context) {
+  if (!ctx.from) return;
+  await db.query(
+    `INSERT INTO users(telegram_id,username,first_name) VALUES($1,$2,$3) ON CONFLICT(telegram_id) DO UPDATE SET username=$2,first_name=$3,updated_at=now()`,
+    [ctx.from.id, ctx.from.username ?? null, ctx.from.first_name],
+  );
+  if (ctx.chat?.type === "private")
+    await db.query(
+      `UPDATE group_members SET started_bot=TRUE,updated_at=now() WHERE user_id=$1`,
+      [ctx.from.id],
+    );
 }
-async function showAccess(ctx:Context){
- if(!ctx.from)return;const active=await one<{id:number,title:string,description:string,media_file_id:string|null,media_type:string|null,target:number,active_progress:number}>(`SELECT c.id,c.title,c.description,c.media_file_id,c.media_type,c.target,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1`,[ctx.from.id]);const unlocked=await many<{id:number,title:string}>(`SELECT c.id,c.title FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 ORDER BY e.granted_at DESC`,[ctx.from.id]);if(!active&&!unlocked.length){try{await ctx.editMessageText('Aucun accès ou objectif en cours.',back)}catch{await ctx.reply('Aucun accès ou objectif en cours.',back)}return}const buttons:any[][]=[];if(active)buttons.push([Markup.button.callback(`📁 ${active.title} — ${active.active_progress}/${active.target} invitations`,`goal_${active.id}`)]);for(const x of unlocked)buttons.push([Markup.button.callback(`📂 ${x.title}`,`access_detail_${x.id}`)]);buttons.push([Markup.button.callback('⬅️ Retour','home')]);const msg='<b>Mes accès</b>\n\nChoisis un dossier pour voir sa fiche et ses actions.';try{await ctx.editMessageText(msg,{parse_mode:'HTML',...Markup.inlineKeyboard(buttons)})}catch{await ctx.reply(msg,{parse_mode:'HTML',...Markup.inlineKeyboard(buttons)})}
+async function showHome(
+  ctx: Context,
+  text = "Bienvenue. Choisis une option :",
+) {
+  await ensureUser(ctx);
+  const x = {
+    parse_mode: "HTML" as const,
+    ...home(await isAdminUser(ctx.from?.id)),
+  };
+  try {
+    await ctx.editMessageText(text, x);
+  } catch {
+    await ctx.reply(text, x);
+  }
 }
-async function requestDeadLink(ctx:Context,campaignId:number){
- if(!ctx.from)return;const e=await one<{title:string,release_version:number,guarantee_until:Date|null}>(`SELECT c.title,e.release_version,e.guarantee_until FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 AND e.campaign_id=$2`,[ctx.from.id,campaignId]);if(!e)return void await ctx.reply('Accès introuvable.',back);if(!e.guarantee_until||new Date(e.guarantee_until)<new Date())return void await ctx.reply(`La garantie de rediffusion de ${config.REISSUE_GUARANTEE_HOURS} heures est terminée. Le dossier reste dans tes accès, mais une nouvelle rediffusion automatique ne peut plus être demandée.`,back);const added=await db.query(`INSERT INTO reissue_requests(user_id,campaign_id,release_version) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`,[ctx.from.id,campaignId,e.release_version]);if(!added.rowCount)return void await ctx.reply('Ta demande est déjà dans la liste. Tu recevras automatiquement le nouveau lien dès son remplacement.',back);for(const id of await adminIds())await bot.telegram.sendMessage(id,`🔗 Lien mort signalé\nUtilisateur : ${ctx.from.id}\nPublication : #${campaignId} · ${e.title}`).catch(()=>{});await ctx.reply('✅ Lien mort enregistré. Tu es ajouté à la liste de rediffusion et le nouveau lien te sera envoyé automatiquement après son remplacement.',back)
+async function privateOnly(ctx: Context) {
+  if (ctx.chat?.type !== "private") {
+    await ctx.answerCbQuery?.("Ouvre le bot en privé.");
+    return false;
+  }
+  return true;
 }
-async function receivePaymentProof(ctx:Context,fileId:string,proofType:'photo'|'document'){
- if(!ctx.from)return;const s=await one<{flow:string,step:string,data:any}>('SELECT flow,step,data FROM sessions WHERE user_id=$1',[ctx.from.id]);if(s?.flow!=='payment'||s.step!=='proof')return;const campaignId=Number(s.data.campaign_id);const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[campaignId]);if(!c)return void await ctx.reply('Cette offre n’est plus disponible.',back);const request=await one<{id:number}>(`INSERT INTO payment_requests(user_id,campaign_id,proof_file_id,proof_type) VALUES($1,$2,$3,$4) RETURNING id`,[ctx.from.id,campaignId,fileId,proofType]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);if(!request)return;const caption=`💳 <b>Preuve de paiement</b>\nUtilisateur : ${ctx.from.id} @${ctx.from.username??'-'}\nOffre : ${esc(c.title)}\nDemande : #${request.id}`;const kb=Markup.inlineKeyboard([[Markup.button.callback('✅ Valider',`paygrant_${request.id}`),Markup.button.callback('❌ Refuser',`paydeny_${request.id}`)]]);for(const id of await adminIds()){if(proofType==='photo')await bot.telegram.sendPhoto(id,fileId,{caption,parse_mode:'HTML',...kb}).catch(()=>{});else await bot.telegram.sendDocument(id,fileId,{caption,parse_mode:'HTML',...kb}).catch(()=>{})}await ctx.reply('✅ Preuve transmise. Tu recevras une réponse après vérification.',back)
+async function getOrCreateLink(userId: number) {
+  let row = await one<{ invite_link: string }>(
+    `SELECT invite_link FROM invite_links WHERE owner_id=$1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`,
+    [userId],
+  );
+  if (row) return row.invite_link;
+  const link = await bot.telegram.createChatInviteLink(config.MAIN_GROUP_ID, {
+    name: `ref_${userId}_${Date.now()}`,
+    creates_join_request: false,
+  });
+  await db.query(
+    `INSERT INTO invite_links(owner_id,invite_link,telegram_link_name) VALUES($1,$2,$3)`,
+    [userId, link.invite_link, link.name],
+  );
+  return link.invite_link;
 }
-async function openCampaign(ctx:Context,id:number){
- if(!await privateOnly(ctx)||!ctx.from)return;await db.query(`INSERT INTO campaign_events(campaign_id,user_id,event_type) SELECT id,$2,'click' FROM campaigns WHERE id=$1`,[id,ctx.from.id]); const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND status='published'`,[id]);
- if(!c)return void await ctx.reply('Cette publication n’est plus disponible.',back);
- await db.query(`INSERT INTO campaign_events(campaign_id,user_id,event_type) VALUES($1,$2,'view')`,[id,ctx.from.id]);
- const got=await one<{delivered_url:string|null}>(`SELECT delivered_url FROM entitlements WHERE user_id=$1 AND campaign_id=$2`,[ctx.from.id,id]); if(got)return void await ctx.reply(`✅ Ton accès :\n${got.delivered_url??c.gofile_url}`,back);
- if(c.access_type==='free'){
-   const u=await one<{free_claims:number,invite_total:number}>(`SELECT free_claims,invite_total FROM users WHERE telegram_id=$1`,[ctx.from.id]);
-   if((u?.free_claims??0)>0&&(u?.invite_total??0)===0)return void await ctx.reply('Pour obtenir un autre contenu gratuit, tu dois d’abord avoir au moins une invitation validée.',back);
-   const granted=await db.query(`WITH added AS (INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) SELECT $1,id,gofile_url,release_version,now(),now()+$3::int*interval '1 hour' FROM campaigns WHERE id=$2 ON CONFLICT DO NOTHING RETURNING 1) UPDATE users SET free_claims=free_claims+1 WHERE telegram_id=$1 AND EXISTS(SELECT 1 FROM added) RETURNING telegram_id`,[ctx.from.id,id,config.REISSUE_GUARANTEE_HOURS]);
-   if(!granted.rowCount)return void await ctx.reply(`✅ Ton accès :\n${c.gofile_url}`,back);
-   return void await ctx.reply(`✅ Accès débloqué :\n${c.gofile_url}`,back);
- }
- if(c.access_type==='paid'){
-   const buttons: any[][]=[]; if(config.PAYPAL_URL)buttons.push([Markup.button.url('💳 PayPal',config.PAYPAL_URL)]);if(config.REVOLUT_URL)buttons.push([Markup.button.url('💳 Revolut',config.REVOLUT_URL)]);buttons.push([Markup.button.callback('📤 J’ai payé','paid_'+id)],[Markup.button.callback('⬅️ Retour','home')]);
-   return void await ctx.reply(`<b>${esc(c.price_text??'Offre payante')}</b>\n\n${esc(config.PAYMENT_TEXT)}`,{parse_mode:'HTML',...Markup.inlineKeyboard(buttons)});
- }
- const active=await one<{active_campaign_id:number|null,active_progress:number}>(`SELECT active_campaign_id,active_progress FROM users WHERE telegram_id=$1`,[ctx.from.id]);
- if(active?.active_campaign_id&&active.active_campaign_id!==id)return void await ctx.reply('Tu as déjà un objectif actif. Tu peux y renoncer depuis « Mes accès » avant de commencer celui-ci.',back);
- if(!active?.active_campaign_id)await db.query(`UPDATE users SET active_campaign_id=$2,active_progress=0 WHERE telegram_id=$1`,[ctx.from.id,id]);
- const link=await getOrCreateLink(ctx.from.id); const now=await one<{active_progress:number}>(`SELECT active_progress FROM users WHERE telegram_id=$1`,[ctx.from.id]);
- await ctx.reply(`🎯 Objectif : ${c.target}\nProgression : ${now?.active_progress??0}/${c.target}\n\nTon lien unique :\n${link}`,Markup.inlineKeyboard([[Markup.button.callback('📁 Voir cet objectif',`goal_${c.id}`)],[Markup.button.callback('⬅️ Retour','home')]]));
+async function publish(c: Campaign) {
+  const type =
+    c.access_type === "free"
+      ? "GRATUIT"
+      : c.access_type === "paid"
+        ? "PAYANT"
+        : `INVITATION · ${c.target} personnes`;
+  const caption = `<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n<b>Accès :</b> ${type}`;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.url(
+        "🔓 Obtenir l’accès",
+        `https://t.me/${(await bot.telegram.getMe()).username}?start=c_${c.id}`,
+      ),
+    ],
+  ]);
+  let msg;
+  if (c.media_file_id && c.media_type === "photo")
+    msg = await bot.telegram.sendPhoto(config.MAIN_GROUP_ID, c.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else if (c.media_file_id && c.media_type === "video")
+    msg = await bot.telegram.sendVideo(config.MAIN_GROUP_ID, c.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else
+    msg = await bot.telegram.sendMessage(config.MAIN_GROUP_ID, caption, {
+      parse_mode: "HTML",
+      ...kb,
+    });
+  await db.query(
+    `UPDATE campaigns SET status='published',message_id=$2,published_at=now() WHERE id=$1`,
+    [c.id, msg.message_id],
+  );
 }
-async function tryUnlock(userId:number){
- const client=await db.connect();let unlocked:Campaign|null=null;
- try{await client.query('BEGIN');const u=(await client.query<{active_campaign_id:number|null,active_progress:number}>(`SELECT active_campaign_id,active_progress FROM users WHERE telegram_id=$1 FOR UPDATE`,[userId])).rows[0];if(!u?.active_campaign_id){await client.query('ROLLBACK');return}const c=(await client.query<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[u.active_campaign_id])).rows[0];if(!c?.target||u.active_progress<c.target){await client.query('ROLLBACK');return}const added=await client.query(`INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT DO NOTHING RETURNING id`,[userId,c.id,c.gofile_url,c.release_version,config.REISSUE_GUARANTEE_HOURS]);if(!added.rowCount){await client.query(`UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1`,[userId]);await client.query('COMMIT');return}await client.query(`UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1`,[userId]);await client.query('COMMIT');unlocked=c}catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
- if(unlocked)await bot.telegram.sendMessage(userId,`🎉 Objectif atteint !\n\n${unlocked.title}\n${unlocked.gofile_url}`).catch(()=>{});
+async function removeAnnouncement(c: Campaign) {
+  if (c.message_id)
+    await bot.telegram
+      .deleteMessage(config.MAIN_GROUP_ID, c.message_id)
+      .catch(() => {});
+  await db.query(`UPDATE campaigns SET message_id=NULL WHERE id=$1`, [c.id]);
+}
+async function sendContent(
+  chatId: number,
+  body: string,
+  fileId?: string | null,
+  mediaType?: string | null,
+) {
+  if (fileId && mediaType === "photo")
+    return bot.telegram.sendPhoto(chatId, fileId, { caption: body });
+  if (fileId && mediaType === "video")
+    return bot.telegram.sendVideo(chatId, fileId, { caption: body });
+  return bot.telegram.sendMessage(chatId, body);
+}
+async function runBroadcast(
+  target: "group" | "users",
+  body: string,
+  fileId?: string | null,
+  mediaType?: string | null,
+) {
+  if (target === "group") {
+    await sendContent(config.MAIN_GROUP_ID, body, fileId, mediaType);
+    return { sent: 1, failed: 0 };
+  }
+  const users = await many<{ telegram_id: string }>(
+    "SELECT telegram_id FROM users ORDER BY telegram_id",
+  );
+  let sent = 0,
+    failed = 0;
+  for (const u of users) {
+    try {
+      await sendContent(Number(u.telegram_id), body, fileId, mediaType);
+      sent++;
+    } catch {
+      failed++;
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return { sent, failed };
+}
+async function showAccess(ctx: Context) {
+  if (!ctx.from) return;
+  const active = await one<{
+    id: number;
+    title: string;
+    description: string;
+    media_file_id: string | null;
+    media_type: string | null;
+    target: number;
+    active_progress: number;
+  }>(
+    `SELECT c.id,c.title,c.description,c.media_file_id,c.media_type,c.target,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1`,
+    [ctx.from.id],
+  );
+  const unlocked = await many<{ id: number; title: string }>(
+    `SELECT c.id,c.title FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 ORDER BY e.granted_at DESC`,
+    [ctx.from.id],
+  );
+  if (!active && !unlocked.length) {
+    try {
+      await ctx.editMessageText("Aucun accès ou objectif en cours.", back);
+    } catch {
+      await ctx.reply("Aucun accès ou objectif en cours.", back);
+    }
+    return;
+  }
+  const buttons: any[][] = [];
+  if (active)
+    buttons.push([
+      Markup.button.callback(
+        `📁 ${active.title} — ${active.active_progress}/${active.target} invitations`,
+        `goal_${active.id}`,
+      ),
+    ]);
+  for (const x of unlocked)
+    buttons.push([
+      Markup.button.callback(`📂 ${x.title}`, `access_detail_${x.id}`),
+    ]);
+  buttons.push([Markup.button.callback("⬅️ Retour", "home")]);
+  const msg =
+    "<b>Mes accès</b>\n\nChoisis un dossier pour voir sa fiche et ses actions.";
+  try {
+    await ctx.editMessageText(msg, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(buttons),
+    });
+  } catch {
+    await ctx.reply(msg, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(buttons),
+    });
+  }
+}
+async function requestDeadLink(ctx: Context, campaignId: number) {
+  if (!ctx.from) return;
+  const e = await one<{
+    title: string;
+    release_version: number;
+    guarantee_until: Date | null;
+  }>(
+    `SELECT c.title,e.release_version,e.guarantee_until FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 AND e.campaign_id=$2`,
+    [ctx.from.id, campaignId],
+  );
+  if (!e) return void (await ctx.reply("Accès introuvable.", back));
+  if (!e.guarantee_until || new Date(e.guarantee_until) < new Date())
+    return void (await ctx.reply(
+      `La garantie de rediffusion de ${config.REISSUE_GUARANTEE_HOURS} heures est terminée. Le dossier reste dans tes accès, mais une nouvelle rediffusion automatique ne peut plus être demandée.`,
+      back,
+    ));
+  const added = await db.query(
+    `INSERT INTO reissue_requests(user_id,campaign_id,release_version) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`,
+    [ctx.from.id, campaignId, e.release_version],
+  );
+  if (!added.rowCount)
+    return void (await ctx.reply(
+      "Ta demande est déjà dans la liste. Tu recevras automatiquement le nouveau lien dès son remplacement.",
+      back,
+    ));
+  for (const id of await adminIds())
+    await bot.telegram
+      .sendMessage(
+        id,
+        `🔗 Lien mort signalé\nUtilisateur : ${ctx.from.id}\nPublication : #${campaignId} · ${e.title}`,
+      )
+      .catch(() => {});
+  await ctx.reply(
+    "✅ Lien mort enregistré. Tu es ajouté à la liste de rediffusion et le nouveau lien te sera envoyé automatiquement après son remplacement.",
+    back,
+  );
+}
+async function receivePaymentProof(
+  ctx: Context,
+  fileId: string,
+  proofType: "photo" | "document",
+) {
+  if (!ctx.from) return;
+  const s = await one<{ flow: string; step: string; data: any }>(
+    "SELECT flow,step,data FROM sessions WHERE user_id=$1",
+    [ctx.from.id],
+  );
+  if (s?.flow !== "payment" || s.step !== "proof") return;
+  const campaignId = Number(s.data.campaign_id);
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [campaignId],
+  );
+  if (!c)
+    return void (await ctx.reply("Cette offre n’est plus disponible.", back));
+  const request = await one<{ id: number }>(
+    `INSERT INTO payment_requests(user_id,campaign_id,proof_file_id,proof_type) VALUES($1,$2,$3,$4) RETURNING id`,
+    [ctx.from.id, campaignId, fileId, proofType],
+  );
+  await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+  if (!request) return;
+  const caption = `💳 <b>Preuve de paiement</b>\nUtilisateur : ${ctx.from.id} @${ctx.from.username ?? "-"}\nOffre : ${esc(c.title)}\nDemande : #${request.id}`;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("✅ Valider", `paygrant_${request.id}`),
+      Markup.button.callback("❌ Refuser", `paydeny_${request.id}`),
+    ],
+  ]);
+  for (const id of await adminIds()) {
+    if (proofType === "photo")
+      await bot.telegram
+        .sendPhoto(id, fileId, { caption, parse_mode: "HTML", ...kb })
+        .catch(() => {});
+    else
+      await bot.telegram
+        .sendDocument(id, fileId, { caption, parse_mode: "HTML", ...kb })
+        .catch(() => {});
+  }
+  await ctx.reply(
+    "✅ Preuve transmise. Tu recevras une réponse après vérification.",
+    back,
+  );
+}
+async function openCampaign(ctx: Context, id: number) {
+  if (!(await privateOnly(ctx)) || !ctx.from) return;
+  await db.query(
+    `INSERT INTO campaign_events(campaign_id,user_id,event_type) SELECT id,$2,'click' FROM campaigns WHERE id=$1`,
+    [id, ctx.from.id],
+  );
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND status='published'`,
+    [id],
+  );
+  if (!c)
+    return void (await ctx.reply(
+      "Cette publication n’est plus disponible.",
+      back,
+    ));
+  await db.query(
+    `INSERT INTO campaign_events(campaign_id,user_id,event_type) VALUES($1,$2,'view')`,
+    [id, ctx.from.id],
+  );
+  const got = await one<{ delivered_url: string | null }>(
+    `SELECT delivered_url FROM entitlements WHERE user_id=$1 AND campaign_id=$2`,
+    [ctx.from.id, id],
+  );
+  if (got)
+    return void (await ctx.reply(
+      `✅ Ton accès :\n${got.delivered_url ?? c.gofile_url}`,
+      back,
+    ));
+  if (c.access_type === "free") {
+    const u = await one<{ free_claims: number; invite_total: number }>(
+      `SELECT free_claims,invite_total FROM users WHERE telegram_id=$1`,
+      [ctx.from.id],
+    );
+    if ((u?.free_claims ?? 0) > 0 && (u?.invite_total ?? 0) === 0)
+      return void (await ctx.reply(
+        "Pour obtenir un autre contenu gratuit, tu dois d’abord avoir au moins une invitation validée.",
+        back,
+      ));
+    const granted = await db.query(
+      `WITH added AS (INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) SELECT $1,id,gofile_url,release_version,now(),now()+$3::int*interval '1 hour' FROM campaigns WHERE id=$2 ON CONFLICT DO NOTHING RETURNING 1) UPDATE users SET free_claims=free_claims+1 WHERE telegram_id=$1 AND EXISTS(SELECT 1 FROM added) RETURNING telegram_id`,
+      [ctx.from.id, id, config.REISSUE_GUARANTEE_HOURS],
+    );
+    if (!granted.rowCount)
+      return void (await ctx.reply(`✅ Ton accès :\n${c.gofile_url}`, back));
+    return void (await ctx.reply(`✅ Accès débloqué :\n${c.gofile_url}`, back));
+  }
+  if (c.access_type === "paid") {
+    const buttons: any[][] = [];
+    if (config.PAYPAL_URL)
+      buttons.push([Markup.button.url("💳 PayPal", config.PAYPAL_URL)]);
+    if (config.REVOLUT_URL)
+      buttons.push([Markup.button.url("💳 Revolut", config.REVOLUT_URL)]);
+    buttons.push(
+      [Markup.button.callback("📤 J’ai payé", "paid_" + id)],
+      [Markup.button.callback("⬅️ Retour", "home")],
+    );
+    return void (await ctx.reply(
+      `<b>${esc(c.price_text ?? "Offre payante")}</b>\n\n${esc(config.PAYMENT_TEXT)}`,
+      { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) },
+    ));
+  }
+  const active = await one<{
+    active_campaign_id: number | null;
+    active_progress: number;
+  }>(
+    `SELECT active_campaign_id,active_progress FROM users WHERE telegram_id=$1`,
+    [ctx.from.id],
+  );
+  if (active?.active_campaign_id && active.active_campaign_id !== id)
+    return void (await ctx.reply(
+      "Tu as déjà un objectif actif. Tu peux y renoncer depuis « Mes accès » avant de commencer celui-ci.",
+      back,
+    ));
+  if (!active?.active_campaign_id)
+    await db.query(
+      `UPDATE users SET active_campaign_id=$2,active_progress=0 WHERE telegram_id=$1`,
+      [ctx.from.id, id],
+    );
+  const link = await getOrCreateLink(ctx.from.id);
+  const now = await one<{ active_progress: number }>(
+    `SELECT active_progress FROM users WHERE telegram_id=$1`,
+    [ctx.from.id],
+  );
+  await ctx.reply(
+    `🎯 Objectif : ${c.target}\nProgression : ${now?.active_progress ?? 0}/${c.target}\n\nTon lien unique :\n${link}`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("📁 Voir cet objectif", `goal_${c.id}`)],
+      [Markup.button.callback("⬅️ Retour", "home")],
+    ]),
+  );
+}
+async function tryUnlock(userId: number) {
+  const client = await db.connect();
+  let unlocked: Campaign | null = null;
+  try {
+    await client.query("BEGIN");
+    const u = (
+      await client.query<{
+        active_campaign_id: number | null;
+        active_progress: number;
+      }>(
+        `SELECT active_campaign_id,active_progress FROM users WHERE telegram_id=$1 FOR UPDATE`,
+        [userId],
+      )
+    ).rows[0];
+    if (!u?.active_campaign_id) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const c = (
+      await client.query<Campaign>(
+        `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+        [u.active_campaign_id],
+      )
+    ).rows[0];
+    if (!c?.target || u.active_progress < c.target) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const added = await client.query(
+      `INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT DO NOTHING RETURNING id`,
+      [
+        userId,
+        c.id,
+        c.gofile_url,
+        c.release_version,
+        config.REISSUE_GUARANTEE_HOURS,
+      ],
+    );
+    if (!added.rowCount) {
+      await client.query(
+        `UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1`,
+        [userId],
+      );
+      await client.query("COMMIT");
+      return;
+    }
+    await client.query(
+      `UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1`,
+      [userId],
+    );
+    await client.query("COMMIT");
+    unlocked = c;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (unlocked)
+    await bot.telegram
+      .sendMessage(
+        userId,
+        `🎉 Objectif atteint !\n\n${unlocked.title}\n${unlocked.gofile_url}`,
+      )
+      .catch(() => {});
 }
 
-bot.start(async ctx=>{await ensureUser(ctx);const p=ctx.payload;if(p?.startsWith('c_'))return openCampaign(ctx,Number(p.slice(2)));await showHome(ctx)});
-bot.action('home',async ctx=>{await ctx.answerCbQuery();await showHome(ctx)});
-bot.action('access',async ctx=>{await ctx.answerCbQuery();await showAccess(ctx)});
-bot.action(/^access_detail_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const id=Number(ctx.match[1]);const c=await one<{title:string,description:string,media_file_id:string|null,media_type:string|null,access_type:string,delivered_url:string}>(`SELECT c.title,c.description,c.media_file_id,c.media_type,c.access_type,COALESCE(e.delivered_url,c.gofile_url) delivered_url FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 AND e.campaign_id=$2`,[ctx.from.id,id]);if(!c)return void await ctx.reply('Ce dossier ne fait pas partie de tes accès.',back);const kind=c.access_type==='free'?'Gratuit':c.access_type==='paid'?'Payant':'Débloqué par invitations';const caption=`<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n<b>Accès :</b> ${kind}`;const kb=Markup.inlineKeyboard([[Markup.button.url('📂 Ouvrir le lien',c.delivered_url),Markup.button.callback('🛟 Signaler',`report_campaign_${id}`)],[Markup.button.callback('⬅️ Mes accès','access')]]);if(c.media_file_id&&c.media_type==='photo')await ctx.replyWithPhoto(c.media_file_id,{caption,parse_mode:'HTML',...kb});else if(c.media_file_id&&c.media_type==='video')await ctx.replyWithVideo(c.media_file_id,{caption,parse_mode:'HTML',...kb});else await ctx.reply(caption,{parse_mode:'HTML',...kb})});
-bot.action(/^goal_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const id=Number(ctx.match[1]);const g=await one<{title:string,description:string,media_file_id:string|null,media_type:string|null,target:number,active_progress:number}>(`SELECT c.title,c.description,c.media_file_id,c.media_type,c.target,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1 AND c.id=$2`,[ctx.from.id,id]);if(!g)return void await ctx.reply('Cet objectif n’est plus actif.',back);const caption=`<b>${esc(g.title)}</b>\n\n${esc(g.description)}\n\n🎯 Progression : <b>${g.active_progress}/${g.target} invitations</b>`;const kb=Markup.inlineKeyboard([[Markup.button.callback('🏳️ Renoncer à cet objectif',`quit_goal_${id}`)],[Markup.button.callback('⬅️ Mes accès','access')]]);if(g.media_file_id&&g.media_type==='photo')await ctx.replyWithPhoto(g.media_file_id,{caption,parse_mode:'HTML',...kb});else if(g.media_file_id&&g.media_type==='video')await ctx.replyWithVideo(g.media_file_id,{caption,parse_mode:'HTML',...kb});else await ctx.reply(caption,{parse_mode:'HTML',...kb})});
-bot.action(/^expired_(\d+)$/,async ctx=>{await ctx.answerCbQuery();await requestDeadLink(ctx,Number(ctx.match[1]))});
-bot.action('invites',async ctx=>{await ctx.answerCbQuery();const link=await getOrCreateLink(ctx.from.id);await ctx.editMessageText(`Partage ton lien personnel pour inviter tes contacts :\n\n${link}`,back)});
-bot.action('progress',async ctx=>{await ctx.answerCbQuery();await showAccess(ctx)});
-bot.action(/^quit_goal_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const id=Number(ctx.match[1]);const g=await one<{title:string,active_progress:number}>(`SELECT c.title,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1 AND c.id=$2`,[ctx.from.id,id]);if(!g)return void await ctx.reply('Cet objectif n’est plus actif.',back);await ctx.reply(`Confirmer l’abandon de « ${g.title} » ?\n\nTa progression actuelle (${g.active_progress} invitation(s)) sera définitivement remise à zéro.`,Markup.inlineKeyboard([[Markup.button.callback('✅ Oui, abandonner',`quit_confirm_${id}`)],[Markup.button.callback('❌ Continuer l’objectif',`goal_${id}`)]]))});
-bot.action(/^quit_confirm_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const id=Number(ctx.match[1]);const changed=await db.query(`UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1 AND active_campaign_id=$2 RETURNING telegram_id`,[ctx.from.id,id]);await ctx.editMessageText(changed.rowCount?'Objectif abandonné. Si tu le reprends plus tard, il recommencera à 0.':'Cet objectif n’est plus actif.',back)});
-bot.action('notifications',async ctx=>{await ctx.answerCbQuery();const u=await one<{notifications:boolean}>(`UPDATE users SET notifications=NOT notifications WHERE telegram_id=$1 RETURNING notifications`,[ctx.from.id]);await ctx.editMessageText(`Notifications ${u?.notifications?'activées ✅':'désactivées 🔕'}.`,back)});
-bot.action('report',async ctx=>{await ctx.answerCbQuery();await showAccess(ctx)});
-bot.action(/^report_campaign_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const campaignId=Number(ctx.match[1]);const access=await one<{title:string,access_type:string,invite_total:number,free_rank:string}>(`SELECT c.title,c.access_type,u.invite_total,CASE WHEN c.access_type='free' THEN (SELECT count(*) FROM entitlements e2 JOIN campaigns c2 ON c2.id=e2.campaign_id WHERE e2.user_id=e.user_id AND c2.access_type='free' AND (e2.granted_at<e.granted_at OR (e2.granted_at=e.granted_at AND e2.id<=e.id))) ELSE 0 END::text free_rank FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id JOIN users u ON u.telegram_id=e.user_id WHERE e.user_id=$1 AND e.campaign_id=$2`,[ctx.from.id,campaignId]);if(!access)return void await ctx.reply('Tu ne possèdes pas ce dossier.',back);const allowed=access.access_type!=='free'||Number(access.free_rank)===1||access.invite_total>0;if(!allowed)return void await ctx.reply('Pour signaler un problème sur un deuxième dossier gratuit ou suivant, tu dois avoir au moins une invitation validée.',back);await ctx.reply(`Que veux-tu signaler pour « ${access.title} » ?`,Markup.inlineKeyboard([[Markup.button.callback('🐛 Bug',`report_bug_${campaignId}`),Markup.button.callback('🔗 Lien mort',`report_dead_${campaignId}`)],[Markup.button.callback('⬅️ Mes accès','access')]]))});
-bot.action(/^report_bug_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const campaignId=Number(ctx.match[1]);const owned=await one<{id:number}>(`SELECT id FROM entitlements WHERE user_id=$1 AND campaign_id=$2`,[ctx.from.id,campaignId]);if(!owned)return void await ctx.reply('Ce dossier ne fait plus partie de tes accès.',back);await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'report','body',jsonb_build_object('campaign_id',$2::int,'kind','bug'::text)) ON CONFLICT(user_id) DO UPDATE SET flow='report',step='body',data=jsonb_build_object('campaign_id',$2::int,'kind','bug'::text),updated_at=now()`,[ctx.from.id,campaignId]);await ctx.reply('Décris précisément le bug dans ton prochain message.',back)});
-bot.action(/^report_dead_(\d+)$/,async ctx=>{await ctx.answerCbQuery();await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await requestDeadLink(ctx,Number(ctx.match[1]))});
-bot.action(/^report_(bug|problem|dead)$/,async ctx=>{await ctx.answerCbQuery();await ctx.reply('Cet ancien bouton a expiré. Rouvre le dossier depuis « Mes accès » puis appuie de nouveau sur « Signaler ».',back)});
-
-bot.action('admin',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await ctx.editMessageText('🛠 <b>Administration</b>',{parse_mode:'HTML',...adminKb})});
-bot.action('broadcast',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await ctx.editMessageText('Où veux-tu envoyer le broadcast ?',Markup.inlineKeyboard([[Markup.button.callback('👥 Groupe principal','broadcast_group')],[Markup.button.callback('📨 Tous les utilisateurs privés','broadcast_users')],[Markup.button.callback('⬅️ Administration','admin')]]))});
-bot.action(/^broadcast_(group|users)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'broadcast','content',jsonb_build_object('target',$2::text)) ON CONFLICT(user_id) DO UPDATE SET flow='broadcast',step='content',data=jsonb_build_object('target',$2::text),updated_at=now()`,[ctx.from.id,ctx.match[1]]);await ctx.editMessageText('Envoie maintenant le texte, la photo ou la vidéo à diffuser. Pour un média, sa légende sera utilisée comme texte.',back)});
-bot.action('ads',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const ads=await many<Ad>('SELECT * FROM scheduled_ads ORDER BY id');const rows=ads.map(a=>[Markup.button.callback(`${a.enabled?'🟢':'⚪️'} #${a.id} ${a.name}`,`ad_toggle_${a.id}`)]);rows.push([Markup.button.callback('➕ Nouvelle pub','ad_new')],[Markup.button.callback('▶️ Publier maintenant','ad_run')],[Markup.button.callback('⬅️ Administration','admin')]);await ctx.editMessageText(`⏱ <b>Rotation toutes les 6 heures</b>\n\n${ads.length?'Appuie sur une pub pour l’activer ou la désactiver.':'Aucune publicité configurée.'}`,{parse_mode:'HTML',...Markup.inlineKeyboard(rows)})});
-bot.action('ad_new',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'ad','name','{}') ON CONFLICT(user_id) DO UPDATE SET flow='ad',step='name',data='{}',updated_at=now()`,[ctx.from.id]);await ctx.editMessageText('Envoie un nom interne pour reconnaître cette publicité.',back)});
-bot.action(/^ad_toggle_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);await db.query('UPDATE scheduled_ads SET enabled=NOT enabled WHERE id=$1',[id]);await audit(ctx.from.id,'scheduled_ad_toggled',null,{adId:id});await ctx.reply('État de la publicité modifié.',adminKb)});
-bot.action('ad_run',async ctx=>{await ctx.answerCbQuery('Publication en cours…');if(!await isAdminUser(ctx.from.id))return;const done=await publishNextAd(true);if(done)await audit(ctx.from.id,'scheduled_ad_published');await ctx.reply(done?'✅ Nouvelle pub publiée, précédente supprimée.':'Aucune publicité active.',adminKb)});
-bot.action('reissues',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const rows=await many<{id:number,title:string,pending:string}>(`SELECT c.id,c.title,count(r.id) FILTER(WHERE r.status='pending')::text pending FROM campaigns c LEFT JOIN reissue_requests r ON r.campaign_id=c.id GROUP BY c.id,c.title ORDER BY c.id DESC LIMIT 10`);if(!rows.length)return void await ctx.editMessageText('Aucune publication disponible.',adminKb);const buttons=rows.flatMap(x=>[[Markup.button.callback(`♻️ ${x.title} · ${x.pending} attente(s)`,`reissue_pending_${x.id}`)],[Markup.button.callback(`📢 ${x.title} · renvoyer à tous`,`reissue_all_${x.id}`)]]);buttons.push([Markup.button.callback('⬅️ Administration','admin')]);await ctx.editMessageText('Choisis une publication puis envoie son nouveau lien. « Tous » est exceptionnel et concerne tous les bénéficiaires.',Markup.inlineKeyboard(buttons))});
-bot.action(/^reissue_(pending|all)_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'reissue','url',jsonb_build_object('mode',$2::text,'campaign_id',$3::int)) ON CONFLICT(user_id) DO UPDATE SET flow='reissue',step='url',data=jsonb_build_object('mode',$2::text,'campaign_id',$3::int),updated_at=now()`,[ctx.from.id,ctx.match[1],Number(ctx.match[2])]);await ctx.editMessageText('Envoie le nouveau lien GoFile. Il deviendra la nouvelle version active.',back)});
-bot.action('new_campaign',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await db.query(`INSERT INTO sessions(user_id,flow,step) VALUES($1,'campaign','title') ON CONFLICT(user_id) DO UPDATE SET flow='campaign',step='title',data='{}'`,[ctx.from.id]);await ctx.editMessageText('Envoie le titre de la publication.',back)});
-bot.action(/^ctype_(free|paid|invite)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const type=ctx.match[1];await db.query(`UPDATE sessions SET data=data||jsonb_build_object('access_type',$2::text),step=$3 WHERE user_id=$1`,[ctx.from.id,type,type==='invite'?'target':type==='paid'?'price':'url']);await ctx.editMessageText(type==='invite'?'Envoie le nombre d’invitations requis.':type==='paid'?'Envoie le prix et les détails de l’offre.':'Envoie le lien GoFile.',back)});
-bot.action(/^publish_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const c=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[Number(ctx.match[1])]);if(c){await publish(c);await audit(ctx.from.id,'campaign_published',c.id);await ctx.editMessageText('✅ Publication envoyée dans le groupe.',adminKb)}});
-bot.action(/^paid_(\d+)$/,async ctx=>{await ctx.answerCbQuery();const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND status='published' AND deleted_at IS NULL`,[Number(ctx.match[1])]);if(!c)return void await ctx.editMessageText('Cette offre n’est plus disponible.',back);const pending=await one(`SELECT 1 FROM payment_requests WHERE user_id=$1 AND campaign_id=$2 AND status='pending'`,[ctx.from.id,c.id]);if(pending)return void await ctx.editMessageText('Une preuve est déjà en attente de vérification pour cette offre.',back);await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'payment','proof',jsonb_build_object('campaign_id',$2::int)) ON CONFLICT(user_id) DO UPDATE SET flow='payment',step='proof',data=jsonb_build_object('campaign_id',$2::int),updated_at=now()`,[ctx.from.id,c.id]);await ctx.editMessageText('📎 Envoie maintenant ta preuve de paiement sous forme de photo ou de document.\n\nAucune demande ne sera transmise sans preuve.',back)});
-bot.action(/^paygrant_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const req=await one<{id:number,user_id:string,campaign_id:number,status:string}>(`UPDATE payment_requests p SET status='approved',reviewed_at=now(),reviewed_by=$2 FROM campaigns c WHERE p.id=$1 AND p.status='pending' AND c.id=p.campaign_id AND c.deleted_at IS NULL RETURNING p.id,p.user_id,p.campaign_id,p.status`,[Number(ctx.match[1]),ctx.from.id]);if(!req)return void await ctx.reply('Cette demande a déjà été traitée ou la publication a été supprimée.');const c=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[req.campaign_id]);if(!c)return;const delivered=await one<{delivered_url:string}>(`INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT(user_id,campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id RETURNING delivered_url`,[req.user_id,c.id,c.gofile_url,c.release_version,config.REISSUE_GUARANTEE_HOURS]);await audit(ctx.from.id,'payment_approved',c.id,{requestId:req.id,userId:req.user_id});await bot.telegram.sendMessage(Number(req.user_id),`✅ Paiement validé.\n${delivered?.delivered_url??c.gofile_url}`).catch(()=>{});await ctx.editMessageCaption?.('✅ Paiement validé.').catch(()=>{})});
-bot.action(/^paydeny_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const requestId=Number(ctx.match[1]);const req=await one<{user_id:string,campaign_id:number}>(`UPDATE payment_requests SET status='rejected',reviewed_at=now(),reviewed_by=$2 WHERE id=$1 AND status='pending' RETURNING user_id,campaign_id`,[requestId,ctx.from.id]);if(!req)return void await ctx.reply('Cette demande a déjà été traitée.');await audit(ctx.from.id,'payment_rejected',req.campaign_id,{requestId,userId:req.user_id});await bot.telegram.sendMessage(Number(req.user_id),'❌ La preuve de paiement n’a pas été validée. Tu peux recommencer et envoyer une preuve plus lisible.').catch(()=>{});await ctx.editMessageCaption?.('❌ Paiement refusé.').catch(()=>{})});
-bot.action(/^grant_(\d+)_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const uid=Number(ctx.match[1]),cid=Number(ctx.match[2]);const c=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[cid]);if(!c)return;const delivered=await one<{delivered_url:string}>(`INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT(user_id,campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id RETURNING delivered_url`,[uid,cid,c.gofile_url,c.release_version,config.REISSUE_GUARANTEE_HOURS]);await bot.telegram.sendMessage(uid,`✅ Paiement validé.\n${delivered?.delivered_url??c.gofile_url}`).catch(()=>{});await ctx.editMessageText('Paiement validé.')});
-bot.action(/^deny_(\d+)_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;await bot.telegram.sendMessage(Number(ctx.match[1]),'❌ Le paiement n’a pas pu être validé. Contacte un administrateur.').catch(()=>{});await ctx.editMessageText('Paiement refusé.')});
-bot.action('words',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const w=await many<{word:string}>('SELECT word FROM banned_words ORDER BY word');await ctx.editMessageText(`🚫 Mots interdits : ${w.map(x=>x.word).join(', ')||'aucun'}\n\nEnvoie : <code>+ mot</code> ou <code>- mot</code>`,{parse_mode:'HTML',...adminKb})});
-bot.action('campaigns',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const cs=await many<Campaign>('SELECT * FROM campaigns WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 20');if(!cs.length)return void await ctx.editMessageText('Aucune publication active ou désactivée.',adminKb);const rows=cs.map(c=>[Markup.button.callback(`${c.status==='published'?'🟢':'⏸'} #${c.id} ${c.title}`,`campaign_view_${c.id}`)]);rows.push([Markup.button.callback('⬅️ Administration','admin')]);await ctx.editMessageText('Choisis une publication pour afficher sa fiche et ses actions.',Markup.inlineKeyboard(rows))});
-bot.action(/^campaign_view_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[Number(ctx.match[1])]);if(!c)return void await ctx.reply('Publication supprimée définitivement.',adminKb);const state=c.status==='published'?'Visible dans le groupe':'Masquée du groupe';const availability=c.content_status==='active'?'GoFile disponible':'GoFile indisponible';const text=`<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n${state}\n${availability}\nType : ${c.access_type}`;const kb=Markup.inlineKeyboard([[Markup.button.callback('📊 Statistiques',`campaign_stats_${c.id}`),Markup.button.callback('✏️ Modifier',`campaign_edit_${c.id}`)],[Markup.button.callback('🔄 Republier',`campaign_republish_${c.id}`)],[Markup.button.callback(c.status==='published'?'⏸ Désactiver':'▶️ Réactiver',c.status==='published'?`campaign_disable_${c.id}`:`campaign_enable_${c.id}`)],[Markup.button.callback(c.content_status==='active'?'⚠️ Déclarer le lien indisponible':'✅ Déclarer le lien disponible',`campaign_state_${c.id}`)],[Markup.button.callback('🗑 Supprimer définitivement',`campaign_delete_${c.id}`)],[Markup.button.callback('⬅️ Publications','campaigns')]]);if(c.media_file_id&&c.media_type==='photo')await ctx.replyWithPhoto(c.media_file_id,{caption:text,parse_mode:'HTML',...kb});else if(c.media_file_id&&c.media_type==='video')await ctx.replyWithVideo(c.media_file_id,{caption:text,parse_mode:'HTML',...kb});else await ctx.reply(text,{parse_mode:'HTML',...kb})});
-bot.action(/^campaign_stats_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const s=await one<{title:string,clicks:string,unique_clicks:string,views:string,unlocks:string,active_goals:string,pending_payments:string,approved_payments:string,rejected_payments:string}>(`SELECT c.title,(SELECT count(*) FROM campaign_events WHERE campaign_id=c.id AND event_type='click')::text clicks,(SELECT count(DISTINCT user_id) FROM campaign_events WHERE campaign_id=c.id AND event_type='click')::text unique_clicks,(SELECT count(*) FROM campaign_events WHERE campaign_id=c.id AND event_type='view')::text views,(SELECT count(*) FROM entitlements WHERE campaign_id=c.id)::text unlocks,(SELECT count(*) FROM users WHERE active_campaign_id=c.id)::text active_goals,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='pending')::text pending_payments,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='approved')::text approved_payments,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='rejected')::text rejected_payments FROM campaigns c WHERE c.id=$1`,[id]);if(!s)return;await ctx.reply(`<b>📊 ${esc(s.title)}</b>\n\nClics : ${s.clicks}\nUtilisateurs uniques : ${s.unique_clicks}\nOuvertures privées : ${s.views}\nDéblocages : ${s.unlocks}\nObjectifs en cours : ${s.active_goals}\nPaiements en attente : ${s.pending_payments}\nPaiements validés : ${s.approved_payments}\nPaiements refusés : ${s.rejected_payments}`,{parse_mode:'HTML',...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Publication',`campaign_view_${id}`)]])})});
-bot.action(/^campaign_edit_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[id]);if(!c)return;const rows:any[][]=[[Markup.button.callback('Titre',`editfield_${id}_title`),Markup.button.callback('Description',`editfield_${id}_description`)],[Markup.button.callback('Photo / vidéo',`editfield_${id}_media`)]];if(c.access_type==='paid')rows.push([Markup.button.callback('Prix / offre',`editfield_${id}_price_text`)]);if(c.access_type==='invite')rows.push([Markup.button.callback('Objectif',`editfield_${id}_target`)]);rows.push([Markup.button.callback('⬅️ Publication',`campaign_view_${id}`)]);await ctx.reply('Quel élément veux-tu modifier ?',Markup.inlineKeyboard(rows))});
-bot.action(/^editfield_(\d+)_(title|description|price_text|target|media)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]),field=ctx.match[2];if(field==='media'){await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'campaign_edit','media',jsonb_build_object('campaign_id',$2::int)) ON CONFLICT(user_id) DO UPDATE SET flow='campaign_edit',step='media',data=jsonb_build_object('campaign_id',$2::int),updated_at=now()`,[ctx.from.id,id]);await ctx.reply('Envoie la nouvelle photo/vidéo, ou supprime le média actuel.',Markup.inlineKeyboard([[Markup.button.callback('🗑 Retirer le média',`editmedia_remove_${id}`)],[Markup.button.callback('❌ Annuler',`campaign_view_${id}`)]]));return}await db.query(`INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'campaign_edit','value',jsonb_build_object('campaign_id',$2::int,'field',$3::text)) ON CONFLICT(user_id) DO UPDATE SET flow='campaign_edit',step='value',data=jsonb_build_object('campaign_id',$2::int,'field',$3::text),updated_at=now()`,[ctx.from.id,id,field]);await ctx.reply(field==='target'?'Envoie le nouvel objectif entier supérieur à 0.':'Envoie la nouvelle valeur.',back)});
-bot.action(/^editmedia_remove_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);await db.query(`UPDATE campaigns SET media_file_id=NULL,media_type=NULL WHERE id=$1 AND deleted_at IS NULL`,[id]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await audit(ctx.from.id,'campaign_media_removed',id);const updated=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[id]);if(updated?.status==='published'){await removeAnnouncement(updated);await publish(updated)}await ctx.reply('✅ Média retiré et annonce actualisée.',Markup.inlineKeyboard([[Markup.button.callback('⬅️ Publication',`campaign_view_${id}`)]]))});
-bot.action('audit_logs',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const logs=await many<{admin_id:string,campaign_id:string|null,action:string,created_at:Date}>(`SELECT admin_id,campaign_id,action,created_at FROM admin_audit_logs ORDER BY id DESC LIMIT 30`);await ctx.editMessageText(logs.length?`🧾 <b>Historique récent</b>\n\n${logs.map(l=>`${new Date(l.created_at).toLocaleString('fr-FR')} · ${l.admin_id}\n${esc(l.action)}${l.campaign_id?` · #${l.campaign_id}`:''}`).join('\n\n')}`:'Aucune action enregistrée.',{parse_mode:'HTML',...adminKb})});
-bot.action(/^campaign_republish_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[Number(ctx.match[1])]);if(!c)return;await removeAnnouncement(c);await publish(c);await audit(ctx.from.id,'campaign_republished',c.id);await ctx.reply('✅ Publication republiée dans le groupe.',adminKb)});
-bot.action(/^campaign_disable_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[Number(ctx.match[1])]);if(!c)return;await removeAnnouncement(c);await db.query(`UPDATE campaigns SET status='closed' WHERE id=$1`,[c.id]);await audit(ctx.from.id,'campaign_disabled',c.id);await ctx.reply('⏸ Publication masquée. Les objectifs déjà commencés et les accès acquis restent valables.',adminKb)});
-bot.action(/^campaign_enable_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[Number(ctx.match[1])]);if(!c)return;await publish(c);await audit(ctx.from.id,'campaign_enabled',c.id);await ctx.reply('▶️ Publication réactivée dans le groupe.',adminKb)});
-bot.action(/^campaign_state_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const c=await one<{content_status:string}>(`UPDATE campaigns SET content_status=CASE WHEN content_status='active' THEN 'disabled' ELSE 'active' END WHERE id=$1 AND deleted_at IS NULL RETURNING content_status`,[id]);await audit(ctx.from.id,c?.content_status==='active'?'content_available':'content_unavailable',id);await ctx.reply(c?.content_status==='active'?'✅ GoFile déclaré disponible.':'⚠️ GoFile déclaré indisponible. Les bénéficiaires éligibles verront le bouton de demande.',adminKb)});
-bot.action(/^campaign_delete_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);await ctx.reply('Cette suppression est définitive. Les bénéficiaires déjà débloqués garderont leur accès, mais la publication ne pourra jamais être réactivée.',Markup.inlineKeyboard([[Markup.button.callback('🗑 Confirmer la suppression',`campaign_delete_confirm_${id}`)],[Markup.button.callback('❌ Annuler',`campaign_view_${id}`)]]))});
-bot.action(/^campaign_delete_confirm_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const c=await one<Campaign>(`SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,[id]);if(!c)return void await ctx.reply('Cette publication est déjà supprimée.',adminKb);await removeAnnouncement(c);const affected=await many<{telegram_id:string}>(`UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE active_campaign_id=$1 RETURNING telegram_id`,[id]);const payments=await many<{user_id:string}>(`UPDATE payment_requests SET status='rejected',reviewed_at=now(),reviewed_by=$2 WHERE campaign_id=$1 AND status='pending' RETURNING user_id`,[id,ctx.from.id]);await db.query(`UPDATE campaigns SET status='closed',deleted_at=now(),message_id=NULL WHERE id=$1`,[id]);await audit(ctx.from.id,'campaign_deleted',id,{cancelledGoals:affected.length,cancelledPayments:payments.length});for(const u of affected)await bot.telegram.sendMessage(Number(u.telegram_id),`L’objectif « ${c.title} » a été retiré. Sa progression a été annulée.`).catch(()=>{});for(const p of payments)await bot.telegram.sendMessage(Number(p.user_id),`La demande de paiement pour « ${c.title} » a été annulée car la publication a été supprimée.`).catch(()=>{});await ctx.reply(`🗑 Publication supprimée définitivement.\nObjectifs en cours annulés : ${affected.length}\nPaiements en attente annulés : ${payments.length}\nLes accès déjà acquis sont conservés.`,adminKb)});
-bot.action('reports',async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const rs=await many<{id:number,user_id:string,kind:string,body:string,title:string|null}>(`SELECT r.*,c.title FROM reports r LEFT JOIN campaigns c ON c.id=r.campaign_id WHERE r.status='open' ORDER BY r.id DESC LIMIT 20`);await ctx.editMessageText(rs.length?rs.map(r=>`#${r.id} · ${r.kind} · ${r.user_id}\n📁 ${r.title??'Dossier supprimé'}\n${r.body}`).join('\n\n'):'Aucun signalement ouvert.',adminKb)});
-
-bot.on('text',async ctx=>{
- await ensureUser(ctx);if(ctx.chat.type!=='private')return;
- if(await isAdminUser(ctx.from.id)&&/^[+-]\s+\S+/.test(ctx.message.text)){const [op,...parts]=ctx.message.text.trim().split(/\s+/);const word=parts.join(' ').toLocaleLowerCase('fr-FR');if(op==='+')await db.query('INSERT INTO banned_words(word) VALUES($1) ON CONFLICT DO NOTHING',[word]);else await db.query('DELETE FROM banned_words WHERE word=$1',[word]);await audit(ctx.from.id,op==='+'?'banned_word_added':'banned_word_removed',null,{word});return void await ctx.reply(`Mot « ${word} » ${op==='+'?'ajouté':'retiré'}.`,adminKb)}
- const s=await one<{flow:string,step:string,data:any}>('SELECT * FROM sessions WHERE user_id=$1',[ctx.from.id]);if(!s)return;
- const text=ctx.message.text.trim();
- if(s.flow==='campaign_edit'&&s.step==='value'&&await isAdminUser(ctx.from.id)){const id=Number(s.data.campaign_id),field=String(s.data.field);let value:string|number=text;if(field==='target'){value=Number(text);if(!Number.isInteger(value)||value<1)return void await ctx.reply('L’objectif doit être un nombre entier supérieur à 0.')}const sql:Record<string,string>={title:'UPDATE campaigns SET title=$2 WHERE id=$1 AND deleted_at IS NULL',description:'UPDATE campaigns SET description=$2 WHERE id=$1 AND deleted_at IS NULL',price_text:'UPDATE campaigns SET price_text=$2 WHERE id=$1 AND deleted_at IS NULL',target:'UPDATE campaigns SET target=$2 WHERE id=$1 AND deleted_at IS NULL'};if(!sql[field])return void await ctx.reply('Champ de modification invalide.',adminKb);await db.query(sql[field],[id,value]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await audit(ctx.from.id,`campaign_${field}_updated`,id,{value});const updated=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[id]);if(updated?.status==='published'){await removeAnnouncement(updated);await publish(updated)}if(field==='target'){const users=await many<{telegram_id:string}>('SELECT telegram_id FROM users WHERE active_campaign_id=$1',[id]);for(const u of users)await tryUnlock(Number(u.telegram_id))}return void await ctx.reply('✅ Publication modifiée. L’annonce visible a été actualisée.',Markup.inlineKeyboard([[Markup.button.callback('⬅️ Publication',`campaign_view_${id}`)]]))}
- if(s.flow==='payment'&&s.step==='proof')return void await ctx.reply('La preuve doit être envoyée sous forme de photo ou de document.',back);
- if(s.flow==='reissue'&&s.step==='url'&&await isAdminUser(ctx.from.id)){
-  if(!/^https?:\/\//.test(text))return void await ctx.reply('Le lien doit commencer par http:// ou https://');const cid=Number(s.data.campaign_id),mode=s.data.mode as 'pending'|'all';const c=await one<Campaign>(`UPDATE campaigns SET gofile_url=$2,release_version=release_version+1,content_status='active',link_expires_at=NULL WHERE id=$1 RETURNING *`,[cid,text]);if(!c)return void await ctx.reply('Publication introuvable.',adminKb);const recipients=mode==='all'?await many<{user_id:string}>(`SELECT user_id::text FROM entitlements WHERE campaign_id=$1`,[cid]):await many<{user_id:string}>(`SELECT DISTINCT user_id::text FROM reissue_requests WHERE campaign_id=$1 AND status='pending'`,[cid]);let sent=0,failed=0;for(const r of recipients){const uid=Number(r.user_id);try{await bot.telegram.sendMessage(uid,`♻️ Nouveau lien disponible pour « ${c.title} » :\n${text}`);await db.query(`UPDATE entitlements SET delivered_url=$3,release_version=$4,delivered_at=now(),guarantee_until=now()+$5::int*interval '1 hour' WHERE user_id=$1 AND campaign_id=$2`,[uid,cid,text,c.release_version,config.REISSUE_GUARANTEE_HOURS]);await db.query(`UPDATE reissue_requests SET status='fulfilled',fulfilled_at=now() WHERE user_id=$1 AND campaign_id=$2 AND status='pending'`,[uid,cid]);sent++}catch{failed++}await new Promise(r=>setTimeout(r,40))}await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);return void await ctx.reply(`✅ Nouvelle version enregistrée.\nEnvoyés : ${sent}\nÉchecs : ${failed}`,adminKb)
- }
- if(s.flow==='broadcast'&&s.step==='content'&&await isAdminUser(ctx.from.id)){const result=await runBroadcast(s.data.target,text);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await audit(ctx.from.id,'broadcast_sent',null,{target:s.data.target,...result});return void await ctx.reply(`✅ Broadcast terminé.\nEnvoyés : ${result.sent}\nÉchecs : ${result.failed}`,adminKb)}
- if(s.flow==='ad'&&await isAdminUser(ctx.from.id)){
-  if(s.step==='name'){await db.query(`UPDATE sessions SET step='body',data=jsonb_build_object('name',$2::text) WHERE user_id=$1`,[ctx.from.id,text]);return void await ctx.reply('Envoie le texte de la publicité.')}
-  if(s.step==='body'){await db.query(`UPDATE sessions SET step='media',data=data||jsonb_build_object('body',$2::text) WHERE user_id=$1`,[ctx.from.id,text]);return void await ctx.reply('Envoie une photo/vidéo, ou écris « passer » pour une pub texte.')}
-  if(s.step==='media'&&text.toLowerCase()==='passer'){await db.query(`INSERT INTO scheduled_ads(name,body,created_by) VALUES($1,$2,$3)`,[s.data.name,s.data.body,ctx.from.id]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);return void await ctx.reply('✅ Publicité ajoutée et activée dans la rotation.',adminKb)}
- }
- if(s.flow==='report'&&s.step==='body'){const campaignId=Number(s.data.campaign_id);await db.query(`INSERT INTO reports(user_id,campaign_id,kind,body) VALUES($1,$2,$3,$4)`,[ctx.from.id,campaignId,s.data.kind,text]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);const c=await one<{title:string}>('SELECT title FROM campaigns WHERE id=$1',[campaignId]);for(const id of await adminIds())await bot.telegram.sendMessage(id,`🛟 Nouveau signalement de ${ctx.from.id}\n📁 ${c?.title??'#'+campaignId}\n${text}`).catch(()=>{});return void await ctx.reply('Merci, ton signalement a été transmis.',home(await isAdminUser(ctx.from.id)))}
- if(s.flow!=='campaign'||!await isAdminUser(ctx.from.id))return;
- if(s.step==='title'){await db.query(`UPDATE sessions SET step='description',data=jsonb_build_object('title',$2::text) WHERE user_id=$1`,[ctx.from.id,text]);return void await ctx.reply('Envoie maintenant la description.')}
- if(s.step==='description'){await db.query(`UPDATE sessions SET step='media',data=data||jsonb_build_object('description',$2::text) WHERE user_id=$1`,[ctx.from.id,text]);return void await ctx.reply('Envoie une photo/vidéo, ou écris « passer ».')}
- if(s.step==='media'&&text.toLowerCase()==='passer'){await db.query(`UPDATE sessions SET step='type' WHERE user_id=$1`,[ctx.from.id]);return void await ctx.reply('Choisis le type d’accès.',Markup.inlineKeyboard([[Markup.button.callback('🆓 Gratuit','ctype_free'),Markup.button.callback('💳 Payant','ctype_paid')],[Markup.button.callback('🎯 Invitation','ctype_invite')]]))}
- if(s.step==='target'){const n=Number(text);if(!Number.isInteger(n)||n<1)return void await ctx.reply('Envoie un nombre entier supérieur à 0.');await db.query(`UPDATE sessions SET step='url',data=data||jsonb_build_object('target',$2::int) WHERE user_id=$1`,[ctx.from.id,n]);return void await ctx.reply('Envoie le lien GoFile.')}
- if(s.step==='price'){await db.query(`UPDATE sessions SET step='url',data=data||jsonb_build_object('price_text',$2::text) WHERE user_id=$1`,[ctx.from.id,text]);return void await ctx.reply('Envoie le lien GoFile.')}
- if(s.step==='url'){if(!/^https?:\/\//.test(text))return void await ctx.reply('Le lien doit commencer par http:// ou https://');const d=s.data;const r=await db.query(`INSERT INTO campaigns(title,description,media_file_id,media_type,access_type,target,gofile_url,price_text,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,[d.title,d.description,d.media_file_id??null,d.media_type??null,d.access_type,d.target??null,text,d.price_text??null,ctx.from.id]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);return void await ctx.reply('Vérifie puis publie.',Markup.inlineKeyboard([[Markup.button.callback('🚀 Publier',`publish_${r.rows[0].id}`)],[Markup.button.callback('⬅️ Administration','admin')]]))}
+bot.start(async (ctx) => {
+  await ensureUser(ctx);
+  const p = ctx.payload;
+  if (p?.startsWith("c_")) return openCampaign(ctx, Number(p.slice(2)));
+  await showHome(ctx);
 });
-bot.on(['photo','video'],async ctx=>{if(ctx.chat.type!=='private')return;const s=await one<{flow:string,step:string,data:any}>('SELECT flow,step,data FROM sessions WHERE user_id=$1',[ctx.from.id]);const photo='photo' in ctx.message;const id=photo?ctx.message.photo.at(-1)!.file_id:ctx.message.video.file_id;const mediaType=photo?'photo':'video';const caption=ctx.message.caption?.trim()??'';if(s?.flow==='payment'&&s.step==='proof'){if(!photo)return void await ctx.reply('Envoie une photo ou un document, pas une vidéo.',back);return void await receivePaymentProof(ctx,id,'photo')}if(!await isAdminUser(ctx.from.id))return;
- if(s?.flow==='campaign_edit'&&s.step==='media'){const campaignId=Number(s.data.campaign_id);await db.query(`UPDATE campaigns SET media_file_id=$2,media_type=$3 WHERE id=$1 AND deleted_at IS NULL`,[campaignId,id,mediaType]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await audit(ctx.from.id,'campaign_media_updated',campaignId,{mediaType});const updated=await one<Campaign>('SELECT * FROM campaigns WHERE id=$1',[campaignId]);if(updated?.status==='published'){await removeAnnouncement(updated);await publish(updated)}return void await ctx.reply('✅ Média modifié et annonce actualisée.',Markup.inlineKeyboard([[Markup.button.callback('⬅️ Publication',`campaign_view_${campaignId}`)]]))}
- if(s?.flow==='broadcast'&&s.step==='content'){const body=caption||' ';const result=await runBroadcast(s.data.target,body,id,mediaType);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);await audit(ctx.from.id,'broadcast_sent',null,{target:s.data.target,mediaType,...result});return void await ctx.reply(`✅ Broadcast terminé.\nEnvoyés : ${result.sent}\nÉchecs : ${result.failed}`,adminKb)}
- if(s?.flow==='ad'&&s.step==='media'){await db.query(`INSERT INTO scheduled_ads(name,body,media_file_id,media_type,created_by) VALUES($1,$2,$3,$4,$5)`,[s.data.name,s.data.body,id,mediaType,ctx.from.id]);await db.query('DELETE FROM sessions WHERE user_id=$1',[ctx.from.id]);return void await ctx.reply('✅ Publicité avec média ajoutée et activée.',adminKb)}
- if(s?.flow!=='campaign'||s.step!=='media')return;await db.query(`UPDATE sessions SET step='type',data=data||jsonb_build_object('media_file_id',$2::text,'media_type',$3::text) WHERE user_id=$1`,[ctx.from.id,id,mediaType]);await ctx.reply('Média enregistré. Choisis le type d’accès.',Markup.inlineKeyboard([[Markup.button.callback('🆓 Gratuit','ctype_free'),Markup.button.callback('💳 Payant','ctype_paid')],[Markup.button.callback('🎯 Invitation','ctype_invite')]]))});
-bot.on('document',async ctx=>{if(ctx.chat.type!=='private')return;await receivePaymentProof(ctx,ctx.message.document.file_id,'document')});
-
-bot.on('chat_member',async ctx=>{
- if(ctx.chat.id!==config.MAIN_GROUP_ID)return;const u=ctx.chatMember.new_chat_member.user;const old=ctx.chatMember.old_chat_member.status,newS=ctx.chatMember.new_chat_member.status;
- if(['left','kicked'].includes(old)&&['member','restricted'].includes(newS)){
-  const words=await many<{word:string}>('SELECT word FROM banned_words');const name=[u.first_name,u.last_name,u.username].filter(Boolean).join(' ').toLocaleLowerCase('fr-FR');const tokens: string[]=name.match(/[\p{L}\p{N}_]+/gu)??[];if(words.some(w=>tokens.includes(w.word.toLocaleLowerCase('fr-FR')))){await bot.telegram.banChatMember(config.MAIN_GROUP_ID,u.id);return}
-  await db.query(`INSERT INTO group_members(user_id,started_bot,join_source) VALUES($1,EXISTS(SELECT 1 FROM users WHERE telegram_id=$1),'main') ON CONFLICT(user_id) DO UPDATE SET joined_at=now(),left_at=NULL,started_bot=group_members.started_bot OR EXCLUDED.started_bot,join_source='main',updated_at=now()`,[u.id]);
-  const link=ctx.chatMember.invite_link?.invite_link;if(link){const owner=await one<{owner_id:string,active_campaign_id:string|null}>(`SELECT l.owner_id,u.active_campaign_id FROM invite_links l JOIN users u ON u.telegram_id=l.owner_id WHERE l.invite_link=$1 AND l.revoked_at IS NULL`,[link]);if(owner&&Number(owner.owner_id)!==u.id){await db.query(`UPDATE group_members SET join_source='personal',updated_at=now() WHERE user_id=$1`,[u.id]);await db.query(`INSERT INTO invite_joins(invitee_id,inviter_id,invite_link,validate_at,campaign_id) VALUES($1,$2,$3,now()+$4::int*interval '1 minute',$5) ON CONFLICT(invitee_id) DO NOTHING`,[u.id,owner.owner_id,link,config.VALIDATION_MINUTES,owner.active_campaign_id])}}
- } else if(['member','restricted'].includes(old)&&['left','kicked'].includes(newS)){await db.query(`UPDATE invite_joins SET status='left' WHERE invitee_id=$1 AND status='pending'`,[u.id]);await db.query(`UPDATE group_members SET left_at=now(),updated_at=now() WHERE user_id=$1`,[u.id])}
+bot.action("home", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHome(ctx);
 });
-bot.on('message',async ctx=>{
- if(ctx.chat.id!==config.MAIN_GROUP_ID)return;if('new_chat_members'in ctx.message||'left_chat_member'in ctx.message){await ctx.deleteMessage().catch(()=>{});return}
- if(!await isAdminUser(ctx.from?.id))await ctx.deleteMessage().catch(()=>{});
+bot.action("access", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showAccess(ctx);
 });
-bot.on('my_chat_member',async ctx=>{if(['member','administrator'].includes(ctx.myChatMember.new_chat_member.status)&&ctx.chat.id!==config.MAIN_GROUP_ID)await bot.telegram.leaveChat(ctx.chat.id).catch(()=>{})});
+bot.action(/^access_detail_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const c = await one<{
+    title: string;
+    description: string;
+    media_file_id: string | null;
+    media_type: string | null;
+    access_type: string;
+    delivered_url: string;
+  }>(
+    `SELECT c.title,c.description,c.media_file_id,c.media_type,c.access_type,COALESCE(e.delivered_url,c.gofile_url) delivered_url FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE e.user_id=$1 AND e.campaign_id=$2`,
+    [ctx.from.id, id],
+  );
+  if (!c)
+    return void (await ctx.reply(
+      "Ce dossier ne fait pas partie de tes accès.",
+      back,
+    ));
+  const kind =
+    c.access_type === "free"
+      ? "Gratuit"
+      : c.access_type === "paid"
+        ? "Payant"
+        : "Débloqué par invitations";
+  const caption = `<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n<b>Accès :</b> ${kind}`;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.url("📂 Ouvrir le lien", c.delivered_url),
+      Markup.button.callback("🛟 Signaler", `report_campaign_${id}`),
+    ],
+    [Markup.button.callback("⬅️ Mes accès", "access")],
+  ]);
+  if (c.media_file_id && c.media_type === "photo")
+    await ctx.replyWithPhoto(c.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else if (c.media_file_id && c.media_type === "video")
+    await ctx.replyWithVideo(c.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else await ctx.reply(caption, { parse_mode: "HTML", ...kb });
+});
+bot.action(/^goal_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const g = await one<{
+    title: string;
+    description: string;
+    media_file_id: string | null;
+    media_type: string | null;
+    target: number;
+    active_progress: number;
+  }>(
+    `SELECT c.title,c.description,c.media_file_id,c.media_type,c.target,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1 AND c.id=$2`,
+    [ctx.from.id, id],
+  );
+  if (!g) return void (await ctx.reply("Cet objectif n’est plus actif.", back));
+  const caption = `<b>${esc(g.title)}</b>\n\n${esc(g.description)}\n\n🎯 Progression : <b>${g.active_progress}/${g.target} invitations</b>`;
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback("🏳️ Renoncer à cet objectif", `quit_goal_${id}`)],
+    [Markup.button.callback("⬅️ Mes accès", "access")],
+  ]);
+  if (g.media_file_id && g.media_type === "photo")
+    await ctx.replyWithPhoto(g.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else if (g.media_file_id && g.media_type === "video")
+    await ctx.replyWithVideo(g.media_file_id, {
+      caption,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else await ctx.reply(caption, { parse_mode: "HTML", ...kb });
+});
+bot.action(/^expired_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await requestDeadLink(ctx, Number(ctx.match[1]));
+});
+bot.action("invites", async (ctx) => {
+  await ctx.answerCbQuery();
+  const link = await getOrCreateLink(ctx.from.id);
+  await ctx.editMessageText(
+    `Partage ton lien personnel pour inviter tes contacts :\n\n${link}`,
+    back,
+  );
+});
+bot.action("progress", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showAccess(ctx);
+});
+bot.action(/^quit_goal_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const g = await one<{ title: string; active_progress: number }>(
+    `SELECT c.title,u.active_progress FROM users u JOIN campaigns c ON c.id=u.active_campaign_id WHERE u.telegram_id=$1 AND c.id=$2`,
+    [ctx.from.id, id],
+  );
+  if (!g) return void (await ctx.reply("Cet objectif n’est plus actif.", back));
+  await ctx.reply(
+    `Confirmer l’abandon de « ${g.title} » ?\n\nTa progression actuelle (${g.active_progress} invitation(s)) sera définitivement remise à zéro.`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Oui, abandonner", `quit_confirm_${id}`)],
+      [Markup.button.callback("❌ Continuer l’objectif", `goal_${id}`)],
+    ]),
+  );
+});
+bot.action(/^quit_confirm_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const changed = await db.query(
+    `UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE telegram_id=$1 AND active_campaign_id=$2 RETURNING telegram_id`,
+    [ctx.from.id, id],
+  );
+  await ctx.editMessageText(
+    changed.rowCount
+      ? "Objectif abandonné. Si tu le reprends plus tard, il recommencera à 0."
+      : "Cet objectif n’est plus actif.",
+    back,
+  );
+});
+bot.action("notifications", async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = await one<{ notifications: boolean }>(
+    `UPDATE users SET notifications=NOT notifications WHERE telegram_id=$1 RETURNING notifications`,
+    [ctx.from.id],
+  );
+  await ctx.editMessageText(
+    `Notifications ${u?.notifications ? "activées ✅" : "désactivées 🔕"}.`,
+    back,
+  );
+});
+bot.action("report", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showAccess(ctx);
+});
+bot.action(/^report_campaign_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const campaignId = Number(ctx.match[1]);
+  const access = await one<{
+    title: string;
+    access_type: string;
+    invite_total: number;
+    free_rank: string;
+  }>(
+    `SELECT c.title,c.access_type,u.invite_total,CASE WHEN c.access_type='free' THEN (SELECT count(*) FROM entitlements e2 JOIN campaigns c2 ON c2.id=e2.campaign_id WHERE e2.user_id=e.user_id AND c2.access_type='free' AND (e2.granted_at<e.granted_at OR (e2.granted_at=e.granted_at AND e2.id<=e.id))) ELSE 0 END::text free_rank FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id JOIN users u ON u.telegram_id=e.user_id WHERE e.user_id=$1 AND e.campaign_id=$2`,
+    [ctx.from.id, campaignId],
+  );
+  if (!access)
+    return void (await ctx.reply("Tu ne possèdes pas ce dossier.", back));
+  const allowed =
+    access.access_type !== "free" ||
+    Number(access.free_rank) === 1 ||
+    access.invite_total > 0;
+  if (!allowed)
+    return void (await ctx.reply(
+      "Pour signaler un problème sur un deuxième dossier gratuit ou suivant, tu dois avoir au moins une invitation validée.",
+      back,
+    ));
+  await ctx.reply(
+    `Que veux-tu signaler pour « ${access.title} » ?`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("🐛 Bug", `report_bug_${campaignId}`),
+        Markup.button.callback("🔗 Lien mort", `report_dead_${campaignId}`),
+      ],
+      [Markup.button.callback("⬅️ Mes accès", "access")],
+    ]),
+  );
+});
+bot.action(/^report_bug_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const campaignId = Number(ctx.match[1]);
+  const owned = await one<{ id: number }>(
+    `SELECT id FROM entitlements WHERE user_id=$1 AND campaign_id=$2`,
+    [ctx.from.id, campaignId],
+  );
+  if (!owned)
+    return void (await ctx.reply(
+      "Ce dossier ne fait plus partie de tes accès.",
+      back,
+    ));
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'report','body',jsonb_build_object('campaign_id',$2::int,'kind','bug'::text)) ON CONFLICT(user_id) DO UPDATE SET flow='report',step='body',data=jsonb_build_object('campaign_id',$2::int,'kind','bug'::text),updated_at=now()`,
+    [ctx.from.id, campaignId],
+  );
+  await ctx.reply("Décris précisément le bug dans ton prochain message.", back);
+});
+bot.action(/^report_dead_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+  await requestDeadLink(ctx, Number(ctx.match[1]));
+});
+bot.action(/^report_(bug|problem|dead)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Cet ancien bouton a expiré. Rouvre le dossier depuis « Mes accès » puis appuie de nouveau sur « Signaler ».",
+    back,
+  );
+});
 
-bot.action(/^cleanup_no_(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const done=await db.query(`UPDATE cleanup_batches SET status='skipped',decided_at=now(),decided_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,[id,ctx.from.id]);if(!done.rowCount)return void await ctx.reply('Ce contrôle a déjà été traité.');await db.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$2::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup' AND (value->>'pending_batch_id')::bigint=$1`,[id,config.INACTIVE_REVIEW_DAYS]);await audit(ctx.from.id,'inactive_cleanup_refused',null,{batchId:id});await ctx.editMessageText(`Aucun membre retiré. Un nouveau contrôle cumulatif sera proposé dans ${config.INACTIVE_REVIEW_DAYS} jours.`)});
-bot.action(/^cleanup_yes_(\d+)$/,async ctx=>{await ctx.answerCbQuery('Nettoyage en cours…');if(!await isAdminUser(ctx.from.id))return;const id=Number(ctx.match[1]);const claimed=await db.query(`UPDATE cleanup_batches SET status='processing',decided_at=now(),decided_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,[id,ctx.from.id]);if(!claimed.rowCount)return void await ctx.reply('Ce contrôle a déjà été traité.');const members=await many<{user_id:string}>(`SELECT bm.user_id FROM cleanup_batch_members bm JOIN group_members gm ON gm.user_id=bm.user_id WHERE bm.batch_id=$1 AND gm.started_bot=FALSE AND gm.left_at IS NULL`,[id]);let removed=0,skipped=0;for(const row of members){const uid=Number(row.user_id);try{const member=await bot.telegram.getChatMember(config.MAIN_GROUP_ID,uid);if(member.status==='creator'||member.status==='administrator'||member.status==='left'||member.status==='kicked'){skipped++;continue}await bot.telegram.banChatMember(config.MAIN_GROUP_ID,uid);await bot.telegram.unbanChatMember(config.MAIN_GROUP_ID,uid,{only_if_banned:true});await db.query(`UPDATE group_members SET left_at=now(),updated_at=now() WHERE user_id=$1`,[uid]);await db.query(`UPDATE cleanup_batch_members SET removed=TRUE WHERE batch_id=$1 AND user_id=$2`,[id,uid]);removed++}catch{skipped++}}await db.query(`UPDATE cleanup_batches SET status='completed',removed_count=$2 WHERE id=$1`,[id,removed]);await db.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$2::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,[id,config.INACTIVE_REVIEW_DAYS]);await audit(ctx.from.id,'inactive_cleanup_approved',null,{batchId:id,removed,skipped});await ctx.editMessageText(`✅ Nettoyage terminé.\nRetirés sans bannissement permanent : ${removed}\nIgnorés ou déjà partis : ${skipped}`)});
+bot.action("admin", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await ctx.editMessageText("🛠 <b>Administration</b>", {
+    parse_mode: "HTML",
+    ...adminKb,
+  });
+});
+bot.action("global_stats", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const s = await one<Record<string, string>>(`SELECT
+ (SELECT count(*) FROM group_members)::text joined_total,
+ (SELECT count(*) FROM group_members WHERE join_source='main')::text joined_main,
+ (SELECT count(*) FROM group_members WHERE join_source='personal')::text joined_personal,
+ (SELECT count(*) FROM group_members WHERE left_at IS NULL)::text current_members,
+ (SELECT count(*) FROM group_members WHERE left_at IS NOT NULL)::text left_members,
+ (SELECT count(*) FROM group_members WHERE left_at IS NULL AND started_bot=FALSE)::text inactive_current,
+ (SELECT count(*) FROM group_members WHERE left_at IS NULL AND started_bot=TRUE)::text active_current,
+ (SELECT count(*) FROM group_members WHERE left_at IS NULL AND started_bot=FALSE AND join_source='main')::text inactive_main,
+ (SELECT count(*) FROM group_members WHERE left_at IS NULL AND started_bot=FALSE AND join_source='personal')::text inactive_personal,
+ (SELECT count(*) FROM users)::text bot_users,
+ (SELECT count(*) FROM invite_joins WHERE status='counted')::text invites_validated,
+ (SELECT count(*) FROM invite_joins WHERE status='pending')::text invites_pending,
+ (SELECT count(*) FROM users WHERE active_campaign_id IS NOT NULL)::text active_goals,
+ (SELECT count(*) FROM entitlements)::text unlocked_total,
+ (SELECT count(*) FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE c.access_type='free')::text unlocked_free,
+ (SELECT count(*) FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE c.access_type='paid')::text unlocked_paid,
+ (SELECT count(*) FROM entitlements e JOIN campaigns c ON c.id=e.campaign_id WHERE c.access_type='invite')::text unlocked_invite,
+ (SELECT count(*) FROM payment_requests WHERE status='pending')::text payments_pending,
+ (SELECT count(*) FROM payment_requests WHERE status='approved')::text payments_approved,
+ (SELECT count(*) FROM reports WHERE status='open')::text reports_open,
+ (SELECT count(DISTINCT user_id) FROM banned_member_events)::text word_banned_people,
+ (SELECT count(*) FROM banned_member_events)::text word_banned_events,
+ (SELECT count(*) FROM reissue_requests WHERE status='pending')::text reissues_pending`);
+  if (!s) return void (await ctx.reply("Statistiques indisponibles.", adminKb));
+  const present = Number(s.current_members),
+    rate = present ? Math.round((Number(s.active_current) / present) * 100) : 0;
+  const text = `📊 <b>Statistiques générales</b>\n\n<b>Arrivées observées</b>\nTotal : ${s.joined_total}\nLien principal : ${s.joined_main}\nLiens personnels : ${s.joined_personal}\nActuellement présents : ${s.current_members}\nDéjà partis/retirés : ${s.left_members}\n\n<b>Inactifs actuellement présents</b>\nTotal : ${s.inactive_current}\nDepuis le lien principal : ${s.inactive_main}\nDepuis une invitation : ${s.inactive_personal}\n\n<b>Utilisation du bot</b>\nUtilisateurs privés enregistrés : ${s.bot_users}\nMembres présents ayant démarré le bot : ${s.active_current}\nTaux d’activation des membres présents : ${rate}%\nInvitations validées : ${s.invites_validated}\nInvitations en attente : ${s.invites_pending}\nObjectifs en cours : ${s.active_goals}\n\n<b>Accès débloqués</b>\nTotal : ${s.unlocked_total}\nGratuits : ${s.unlocked_free}\nPayants : ${s.unlocked_paid}\nPar invitations : ${s.unlocked_invite}\n\n<b>À traiter</b>\nPaiements en attente : ${s.payments_pending}\nPaiements validés : ${s.payments_approved}\nSignalements ouverts : ${s.reports_open}\nRediffusions en attente : ${s.reissues_pending}\n\n<b>Modération automatique</b>\nPersonnes bannies pour mot interdit : ${s.word_banned_people}\nBannissements déclenchés : ${s.word_banned_events}\n\n<i>Les arrivées et bannissements comptent uniquement les événements observés depuis l’activation de leur suivi.</i>`;
+  await ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔄 Actualiser", "global_stats")],
+      [Markup.button.callback("⬅️ Administration", "admin")],
+    ]),
+  });
+});
+bot.action("broadcast", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await ctx.editMessageText(
+    "Où veux-tu envoyer le broadcast ?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("👥 Groupe principal", "broadcast_group")],
+      [
+        Markup.button.callback(
+          "📨 Tous les utilisateurs privés",
+          "broadcast_users",
+        ),
+      ],
+      [Markup.button.callback("⬅️ Administration", "admin")],
+    ]),
+  );
+});
+bot.action(/^broadcast_(group|users)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'broadcast','content',jsonb_build_object('target',$2::text)) ON CONFLICT(user_id) DO UPDATE SET flow='broadcast',step='content',data=jsonb_build_object('target',$2::text),updated_at=now()`,
+    [ctx.from.id, ctx.match[1]],
+  );
+  await ctx.editMessageText(
+    "Envoie maintenant le texte, la photo ou la vidéo à diffuser. Pour un média, sa légende sera utilisée comme texte.",
+    back,
+  );
+});
+bot.action("ads", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const ads = await many<Ad>("SELECT * FROM scheduled_ads ORDER BY id");
+  const rows = ads.map((a) => [
+    Markup.button.callback(
+      `${a.enabled ? "🟢" : "⚪️"} #${a.id} ${a.name}`,
+      `ad_toggle_${a.id}`,
+    ),
+  ]);
+  rows.push(
+    [Markup.button.callback("➕ Nouvelle pub", "ad_new")],
+    [Markup.button.callback("▶️ Publier maintenant", "ad_run")],
+    [Markup.button.callback("⬅️ Administration", "admin")],
+  );
+  await ctx.editMessageText(
+    `⏱ <b>Rotation toutes les 6 heures</b>\n\n${ads.length ? "Appuie sur une pub pour l’activer ou la désactiver." : "Aucune publicité configurée."}`,
+    { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) },
+  );
+});
+bot.action("ad_new", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'ad','name','{}') ON CONFLICT(user_id) DO UPDATE SET flow='ad',step='name',data='{}',updated_at=now()`,
+    [ctx.from.id],
+  );
+  await ctx.editMessageText(
+    "Envoie un nom interne pour reconnaître cette publicité.",
+    back,
+  );
+});
+bot.action(/^ad_toggle_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  await db.query("UPDATE scheduled_ads SET enabled=NOT enabled WHERE id=$1", [
+    id,
+  ]);
+  await audit(ctx.from.id, "scheduled_ad_toggled", null, { adId: id });
+  await ctx.reply("État de la publicité modifié.", adminKb);
+});
+bot.action("ad_run", async (ctx) => {
+  await ctx.answerCbQuery("Publication en cours…");
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const done = await publishNextAd(true);
+  if (done) await audit(ctx.from.id, "scheduled_ad_published");
+  await ctx.reply(
+    done
+      ? "✅ Nouvelle pub publiée, précédente supprimée."
+      : "Aucune publicité active.",
+    adminKb,
+  );
+});
+bot.action("reissues", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const rows = await many<{ id: number; title: string; pending: string }>(
+    `SELECT c.id,c.title,count(r.id) FILTER(WHERE r.status='pending')::text pending FROM campaigns c LEFT JOIN reissue_requests r ON r.campaign_id=c.id GROUP BY c.id,c.title ORDER BY c.id DESC LIMIT 10`,
+  );
+  if (!rows.length)
+    return void (await ctx.editMessageText(
+      "Aucune publication disponible.",
+      adminKb,
+    ));
+  const buttons = rows.flatMap((x) => [
+    [
+      Markup.button.callback(
+        `♻️ ${x.title} · ${x.pending} attente(s)`,
+        `reissue_pending_${x.id}`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `📢 ${x.title} · renvoyer à tous`,
+        `reissue_all_${x.id}`,
+      ),
+    ],
+  ]);
+  buttons.push([Markup.button.callback("⬅️ Administration", "admin")]);
+  await ctx.editMessageText(
+    "Choisis une publication puis envoie son nouveau lien. « Tous » est exceptionnel et concerne tous les bénéficiaires.",
+    Markup.inlineKeyboard(buttons),
+  );
+});
+bot.action(/^reissue_(pending|all)_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'reissue','url',jsonb_build_object('mode',$2::text,'campaign_id',$3::int)) ON CONFLICT(user_id) DO UPDATE SET flow='reissue',step='url',data=jsonb_build_object('mode',$2::text,'campaign_id',$3::int),updated_at=now()`,
+    [ctx.from.id, ctx.match[1], Number(ctx.match[2])],
+  );
+  await ctx.editMessageText(
+    "Envoie le nouveau lien GoFile. Il deviendra la nouvelle version active.",
+    back,
+  );
+});
+bot.action("new_campaign", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step) VALUES($1,'campaign','title') ON CONFLICT(user_id) DO UPDATE SET flow='campaign',step='title',data='{}'`,
+    [ctx.from.id],
+  );
+  await ctx.editMessageText("Envoie le titre de la publication.", back);
+});
+bot.action(/^ctype_(free|paid|invite)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const type = ctx.match[1];
+  await db.query(
+    `UPDATE sessions SET data=data||jsonb_build_object('access_type',$2::text),step=$3 WHERE user_id=$1`,
+    [
+      ctx.from.id,
+      type,
+      type === "invite" ? "target" : type === "paid" ? "price" : "url",
+    ],
+  );
+  await ctx.editMessageText(
+    type === "invite"
+      ? "Envoie le nombre d’invitations requis."
+      : type === "paid"
+        ? "Envoie le prix et les détails de l’offre."
+        : "Envoie le lien GoFile.",
+    back,
+  );
+});
+bot.action(/^publish_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const c = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [
+    Number(ctx.match[1]),
+  ]);
+  if (c) {
+    await publish(c);
+    await audit(ctx.from.id, "campaign_published", c.id);
+    await ctx.editMessageText(
+      "✅ Publication envoyée dans le groupe.",
+      adminKb,
+    );
+  }
+});
+bot.action(/^paid_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND status='published' AND deleted_at IS NULL`,
+    [Number(ctx.match[1])],
+  );
+  if (!c)
+    return void (await ctx.editMessageText(
+      "Cette offre n’est plus disponible.",
+      back,
+    ));
+  const pending = await one(
+    `SELECT 1 FROM payment_requests WHERE user_id=$1 AND campaign_id=$2 AND status='pending'`,
+    [ctx.from.id, c.id],
+  );
+  if (pending)
+    return void (await ctx.editMessageText(
+      "Une preuve est déjà en attente de vérification pour cette offre.",
+      back,
+    ));
+  await db.query(
+    `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'payment','proof',jsonb_build_object('campaign_id',$2::int)) ON CONFLICT(user_id) DO UPDATE SET flow='payment',step='proof',data=jsonb_build_object('campaign_id',$2::int),updated_at=now()`,
+    [ctx.from.id, c.id],
+  );
+  await ctx.editMessageText(
+    "📎 Envoie maintenant ta preuve de paiement sous forme de photo ou de document.\n\nAucune demande ne sera transmise sans preuve.",
+    back,
+  );
+});
+bot.action(/^paygrant_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const req = await one<{
+    id: number;
+    user_id: string;
+    campaign_id: number;
+    status: string;
+  }>(
+    `UPDATE payment_requests p SET status='approved',reviewed_at=now(),reviewed_by=$2 FROM campaigns c WHERE p.id=$1 AND p.status='pending' AND c.id=p.campaign_id AND c.deleted_at IS NULL RETURNING p.id,p.user_id,p.campaign_id,p.status`,
+    [Number(ctx.match[1]), ctx.from.id],
+  );
+  if (!req)
+    return void (await ctx.reply(
+      "Cette demande a déjà été traitée ou la publication a été supprimée.",
+    ));
+  const c = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [
+    req.campaign_id,
+  ]);
+  if (!c) return;
+  const delivered = await one<{ delivered_url: string }>(
+    `INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT(user_id,campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id RETURNING delivered_url`,
+    [
+      req.user_id,
+      c.id,
+      c.gofile_url,
+      c.release_version,
+      config.REISSUE_GUARANTEE_HOURS,
+    ],
+  );
+  await audit(ctx.from.id, "payment_approved", c.id, {
+    requestId: req.id,
+    userId: req.user_id,
+  });
+  await bot.telegram
+    .sendMessage(
+      Number(req.user_id),
+      `✅ Paiement validé.\n${delivered?.delivered_url ?? c.gofile_url}`,
+    )
+    .catch(() => {});
+  await ctx.editMessageCaption?.("✅ Paiement validé.").catch(() => {});
+});
+bot.action(/^paydeny_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const requestId = Number(ctx.match[1]);
+  const req = await one<{ user_id: string; campaign_id: number }>(
+    `UPDATE payment_requests SET status='rejected',reviewed_at=now(),reviewed_by=$2 WHERE id=$1 AND status='pending' RETURNING user_id,campaign_id`,
+    [requestId, ctx.from.id],
+  );
+  if (!req) return void (await ctx.reply("Cette demande a déjà été traitée."));
+  await audit(ctx.from.id, "payment_rejected", req.campaign_id, {
+    requestId,
+    userId: req.user_id,
+  });
+  await bot.telegram
+    .sendMessage(
+      Number(req.user_id),
+      "❌ La preuve de paiement n’a pas été validée. Tu peux recommencer et envoyer une preuve plus lisible.",
+    )
+    .catch(() => {});
+  await ctx.editMessageCaption?.("❌ Paiement refusé.").catch(() => {});
+});
+bot.action(/^grant_(\d+)_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const uid = Number(ctx.match[1]),
+    cid = Number(ctx.match[2]);
+  const c = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [cid]);
+  if (!c) return;
+  const delivered = await one<{ delivered_url: string }>(
+    `INSERT INTO entitlements(user_id,campaign_id,delivered_url,release_version,delivered_at,guarantee_until) VALUES($1,$2,$3,$4,now(),now()+$5::int*interval '1 hour') ON CONFLICT(user_id,campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id RETURNING delivered_url`,
+    [uid, cid, c.gofile_url, c.release_version, config.REISSUE_GUARANTEE_HOURS],
+  );
+  await bot.telegram
+    .sendMessage(
+      uid,
+      `✅ Paiement validé.\n${delivered?.delivered_url ?? c.gofile_url}`,
+    )
+    .catch(() => {});
+  await ctx.editMessageText("Paiement validé.");
+});
+bot.action(/^deny_(\d+)_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  await bot.telegram
+    .sendMessage(
+      Number(ctx.match[1]),
+      "❌ Le paiement n’a pas pu être validé. Contacte un administrateur.",
+    )
+    .catch(() => {});
+  await ctx.editMessageText("Paiement refusé.");
+});
+bot.action("words", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const w = await many<{ word: string }>(
+    "SELECT word FROM banned_words ORDER BY word",
+  );
+  await ctx.editMessageText(
+    `🚫 Mots interdits : ${w.map((x) => x.word).join(", ") || "aucun"}\n\nEnvoie : <code>+ mot</code> ou <code>- mot</code>`,
+    { parse_mode: "HTML", ...adminKb },
+  );
+});
+bot.action("campaigns", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const cs = await many<Campaign>(
+    "SELECT * FROM campaigns WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 20",
+  );
+  if (!cs.length)
+    return void (await ctx.editMessageText(
+      "Aucune publication active ou désactivée.",
+      adminKb,
+    ));
+  const rows = cs.map((c) => [
+    Markup.button.callback(
+      `${c.status === "published" ? "🟢" : "⏸"} #${c.id} ${c.title}`,
+      `campaign_view_${c.id}`,
+    ),
+  ]);
+  rows.push([Markup.button.callback("⬅️ Administration", "admin")]);
+  await ctx.editMessageText(
+    "Choisis une publication pour afficher sa fiche et ses actions.",
+    Markup.inlineKeyboard(rows),
+  );
+});
+bot.action(/^campaign_view_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [Number(ctx.match[1])],
+  );
+  if (!c)
+    return void (await ctx.reply(
+      "Publication supprimée définitivement.",
+      adminKb,
+    ));
+  const state =
+    c.status === "published" ? "Visible dans le groupe" : "Masquée du groupe";
+  const availability =
+    c.content_status === "active" ? "GoFile disponible" : "GoFile indisponible";
+  const text = `<b>${esc(c.title)}</b>\n\n${esc(c.description)}\n\n${state}\n${availability}\nType : ${c.access_type}`;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("📊 Statistiques", `campaign_stats_${c.id}`),
+      Markup.button.callback("✏️ Modifier", `campaign_edit_${c.id}`),
+    ],
+    [Markup.button.callback("🔄 Republier", `campaign_republish_${c.id}`)],
+    [
+      Markup.button.callback(
+        c.status === "published" ? "⏸ Désactiver" : "▶️ Réactiver",
+        c.status === "published"
+          ? `campaign_disable_${c.id}`
+          : `campaign_enable_${c.id}`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        c.content_status === "active"
+          ? "⚠️ Déclarer le lien indisponible"
+          : "✅ Déclarer le lien disponible",
+        `campaign_state_${c.id}`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🗑 Supprimer définitivement",
+        `campaign_delete_${c.id}`,
+      ),
+    ],
+    [Markup.button.callback("⬅️ Publications", "campaigns")],
+  ]);
+  if (c.media_file_id && c.media_type === "photo")
+    await ctx.replyWithPhoto(c.media_file_id, {
+      caption: text,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else if (c.media_file_id && c.media_type === "video")
+    await ctx.replyWithVideo(c.media_file_id, {
+      caption: text,
+      parse_mode: "HTML",
+      ...kb,
+    });
+  else await ctx.reply(text, { parse_mode: "HTML", ...kb });
+});
+bot.action(/^campaign_stats_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const s = await one<{
+    title: string;
+    clicks: string;
+    unique_clicks: string;
+    views: string;
+    unlocks: string;
+    active_goals: string;
+    pending_payments: string;
+    approved_payments: string;
+    rejected_payments: string;
+  }>(
+    `SELECT c.title,(SELECT count(*) FROM campaign_events WHERE campaign_id=c.id AND event_type='click')::text clicks,(SELECT count(DISTINCT user_id) FROM campaign_events WHERE campaign_id=c.id AND event_type='click')::text unique_clicks,(SELECT count(*) FROM campaign_events WHERE campaign_id=c.id AND event_type='view')::text views,(SELECT count(*) FROM entitlements WHERE campaign_id=c.id)::text unlocks,(SELECT count(*) FROM users WHERE active_campaign_id=c.id)::text active_goals,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='pending')::text pending_payments,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='approved')::text approved_payments,(SELECT count(*) FROM payment_requests WHERE campaign_id=c.id AND status='rejected')::text rejected_payments FROM campaigns c WHERE c.id=$1`,
+    [id],
+  );
+  if (!s) return;
+  await ctx.reply(
+    `<b>📊 ${esc(s.title)}</b>\n\nClics : ${s.clicks}\nUtilisateurs uniques : ${s.unique_clicks}\nOuvertures privées : ${s.views}\nDéblocages : ${s.unlocks}\nObjectifs en cours : ${s.active_goals}\nPaiements en attente : ${s.pending_payments}\nPaiements validés : ${s.approved_payments}\nPaiements refusés : ${s.rejected_payments}`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("⬅️ Publication", `campaign_view_${id}`)],
+      ]),
+    },
+  );
+});
+bot.action(/^campaign_edit_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [id],
+  );
+  if (!c) return;
+  const rows: any[][] = [
+    [
+      Markup.button.callback("Titre", `editfield_${id}_title`),
+      Markup.button.callback("Description", `editfield_${id}_description`),
+    ],
+    [Markup.button.callback("Photo / vidéo", `editfield_${id}_media`)],
+  ];
+  if (c.access_type === "paid")
+    rows.push([
+      Markup.button.callback("Prix / offre", `editfield_${id}_price_text`),
+    ]);
+  if (c.access_type === "invite")
+    rows.push([Markup.button.callback("Objectif", `editfield_${id}_target`)]);
+  rows.push([Markup.button.callback("⬅️ Publication", `campaign_view_${id}`)]);
+  await ctx.reply(
+    "Quel élément veux-tu modifier ?",
+    Markup.inlineKeyboard(rows),
+  );
+});
+bot.action(
+  /^editfield_(\d+)_(title|description|price_text|target|media)$/,
+  async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!(await isAdminUser(ctx.from.id))) return;
+    const id = Number(ctx.match[1]),
+      field = ctx.match[2];
+    if (field === "media") {
+      await db.query(
+        `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'campaign_edit','media',jsonb_build_object('campaign_id',$2::int)) ON CONFLICT(user_id) DO UPDATE SET flow='campaign_edit',step='media',data=jsonb_build_object('campaign_id',$2::int),updated_at=now()`,
+        [ctx.from.id, id],
+      );
+      await ctx.reply(
+        "Envoie la nouvelle photo/vidéo, ou supprime le média actuel.",
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "🗑 Retirer le média",
+              `editmedia_remove_${id}`,
+            ),
+          ],
+          [Markup.button.callback("❌ Annuler", `campaign_view_${id}`)],
+        ]),
+      );
+      return;
+    }
+    await db.query(
+      `INSERT INTO sessions(user_id,flow,step,data) VALUES($1,'campaign_edit','value',jsonb_build_object('campaign_id',$2::int,'field',$3::text)) ON CONFLICT(user_id) DO UPDATE SET flow='campaign_edit',step='value',data=jsonb_build_object('campaign_id',$2::int,'field',$3::text),updated_at=now()`,
+      [ctx.from.id, id, field],
+    );
+    await ctx.reply(
+      field === "target"
+        ? "Envoie le nouvel objectif entier supérieur à 0."
+        : "Envoie la nouvelle valeur.",
+      back,
+    );
+  },
+);
+bot.action(/^editmedia_remove_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  await db.query(
+    `UPDATE campaigns SET media_file_id=NULL,media_type=NULL WHERE id=$1 AND deleted_at IS NULL`,
+    [id],
+  );
+  await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+  await audit(ctx.from.id, "campaign_media_removed", id);
+  const updated = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [
+    id,
+  ]);
+  if (updated?.status === "published") {
+    await removeAnnouncement(updated);
+    await publish(updated);
+  }
+  await ctx.reply(
+    "✅ Média retiré et annonce actualisée.",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("⬅️ Publication", `campaign_view_${id}`)],
+    ]),
+  );
+});
+bot.action("audit_logs", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const logs = await many<{
+    admin_id: string;
+    campaign_id: string | null;
+    action: string;
+    created_at: Date;
+  }>(
+    `SELECT admin_id,campaign_id,action,created_at FROM admin_audit_logs ORDER BY id DESC LIMIT 30`,
+  );
+  await ctx.editMessageText(
+    logs.length
+      ? `🧾 <b>Historique récent</b>\n\n${logs.map((l) => `${new Date(l.created_at).toLocaleString("fr-FR")} · ${l.admin_id}\n${esc(l.action)}${l.campaign_id ? ` · #${l.campaign_id}` : ""}`).join("\n\n")}`
+      : "Aucune action enregistrée.",
+    { parse_mode: "HTML", ...adminKb },
+  );
+});
+bot.action(/^campaign_republish_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [Number(ctx.match[1])],
+  );
+  if (!c) return;
+  await removeAnnouncement(c);
+  await publish(c);
+  await audit(ctx.from.id, "campaign_republished", c.id);
+  await ctx.reply("✅ Publication republiée dans le groupe.", adminKb);
+});
+bot.action(/^campaign_disable_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [Number(ctx.match[1])],
+  );
+  if (!c) return;
+  await removeAnnouncement(c);
+  await db.query(`UPDATE campaigns SET status='closed' WHERE id=$1`, [c.id]);
+  await audit(ctx.from.id, "campaign_disabled", c.id);
+  await ctx.reply(
+    "⏸ Publication masquée. Les objectifs déjà commencés et les accès acquis restent valables.",
+    adminKb,
+  );
+});
+bot.action(/^campaign_enable_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [Number(ctx.match[1])],
+  );
+  if (!c) return;
+  await publish(c);
+  await audit(ctx.from.id, "campaign_enabled", c.id);
+  await ctx.reply("▶️ Publication réactivée dans le groupe.", adminKb);
+});
+bot.action(/^campaign_state_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const c = await one<{ content_status: string }>(
+    `UPDATE campaigns SET content_status=CASE WHEN content_status='active' THEN 'disabled' ELSE 'active' END WHERE id=$1 AND deleted_at IS NULL RETURNING content_status`,
+    [id],
+  );
+  await audit(
+    ctx.from.id,
+    c?.content_status === "active"
+      ? "content_available"
+      : "content_unavailable",
+    id,
+  );
+  await ctx.reply(
+    c?.content_status === "active"
+      ? "✅ GoFile déclaré disponible."
+      : "⚠️ GoFile déclaré indisponible. Les bénéficiaires éligibles verront le bouton de demande.",
+    adminKb,
+  );
+});
+bot.action(/^campaign_delete_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  await ctx.reply(
+    "Cette suppression est définitive. Les bénéficiaires déjà débloqués garderont leur accès, mais la publication ne pourra jamais être réactivée.",
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "🗑 Confirmer la suppression",
+          `campaign_delete_confirm_${id}`,
+        ),
+      ],
+      [Markup.button.callback("❌ Annuler", `campaign_view_${id}`)],
+    ]),
+  );
+});
+bot.action(/^campaign_delete_confirm_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const c = await one<Campaign>(
+    `SELECT * FROM campaigns WHERE id=$1 AND deleted_at IS NULL`,
+    [id],
+  );
+  if (!c)
+    return void (await ctx.reply(
+      "Cette publication est déjà supprimée.",
+      adminKb,
+    ));
+  await removeAnnouncement(c);
+  const affected = await many<{ telegram_id: string }>(
+    `UPDATE users SET active_campaign_id=NULL,active_progress=0 WHERE active_campaign_id=$1 RETURNING telegram_id`,
+    [id],
+  );
+  const payments = await many<{ user_id: string }>(
+    `UPDATE payment_requests SET status='rejected',reviewed_at=now(),reviewed_by=$2 WHERE campaign_id=$1 AND status='pending' RETURNING user_id`,
+    [id, ctx.from.id],
+  );
+  await db.query(
+    `UPDATE campaigns SET status='closed',deleted_at=now(),message_id=NULL WHERE id=$1`,
+    [id],
+  );
+  await audit(ctx.from.id, "campaign_deleted", id, {
+    cancelledGoals: affected.length,
+    cancelledPayments: payments.length,
+  });
+  for (const u of affected)
+    await bot.telegram
+      .sendMessage(
+        Number(u.telegram_id),
+        `L’objectif « ${c.title} » a été retiré. Sa progression a été annulée.`,
+      )
+      .catch(() => {});
+  for (const p of payments)
+    await bot.telegram
+      .sendMessage(
+        Number(p.user_id),
+        `La demande de paiement pour « ${c.title} » a été annulée car la publication a été supprimée.`,
+      )
+      .catch(() => {});
+  await ctx.reply(
+    `🗑 Publication supprimée définitivement.\nObjectifs en cours annulés : ${affected.length}\nPaiements en attente annulés : ${payments.length}\nLes accès déjà acquis sont conservés.`,
+    adminKb,
+  );
+});
+bot.action("reports", async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const rs = await many<{
+    id: number;
+    user_id: string;
+    kind: string;
+    body: string;
+    title: string | null;
+  }>(
+    `SELECT r.*,c.title FROM reports r LEFT JOIN campaigns c ON c.id=r.campaign_id WHERE r.status='open' ORDER BY r.id DESC LIMIT 20`,
+  );
+  await ctx.editMessageText(
+    rs.length
+      ? rs
+          .map(
+            (r) =>
+              `#${r.id} · ${r.kind} · ${r.user_id}\n📁 ${r.title ?? "Dossier supprimé"}\n${r.body}`,
+          )
+          .join("\n\n")
+      : "Aucun signalement ouvert.",
+    adminKb,
+  );
+});
 
-async function reviewInactiveMembers(){const client=await db.connect();let batchId:number|null=null,count=0;try{await client.query('BEGIN');await client.query(`SELECT pg_advisory_xact_lock(731947)`);const row=(await client.query<{value:{next_at:string|null,pending_batch_id:number|null}}>(`SELECT value FROM app_settings WHERE key='member_cleanup' FOR UPDATE`)).rows[0];const state=row?.value??{next_at:null,pending_batch_id:null};if(state.pending_batch_id){await client.query('ROLLBACK');return}if(!state.next_at){await client.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$1::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,[config.INACTIVE_REVIEW_DAYS]);await client.query('COMMIT');return}if(new Date(state.next_at)>new Date()){await client.query('ROLLBACK');return}const candidates=await client.query<{user_id:string}>(`SELECT user_id FROM group_members WHERE started_bot=FALSE AND left_at IS NULL AND joined_at<=now()-$1::int*interval '1 day'`,[config.INACTIVE_REVIEW_DAYS]);count=candidates.rowCount??0;if(!count){await client.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$1::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,[config.INACTIVE_REVIEW_DAYS]);await client.query('COMMIT');return}const batch=(await client.query<{id:number}>(`INSERT INTO cleanup_batches(detected_count) VALUES($1) RETURNING id`,[count])).rows[0];if(!batch){await client.query('ROLLBACK');return}batchId=batch.id;for(const c of candidates.rows)await client.query(`INSERT INTO cleanup_batch_members(batch_id,user_id) VALUES($1,$2)`,[batchId,c.user_id]);await client.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',NULL,'pending_batch_id',$1::bigint),updated_at=now() WHERE key='member_cleanup'`,[batchId]);await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}if(!batchId)return;const kb=Markup.inlineKeyboard([[Markup.button.callback(`✅ Oui, retirer les ${count}`,`cleanup_yes_${batchId}`)],[Markup.button.callback('❌ Non, conserver et recompter plus tard',`cleanup_no_${batchId}`)]]);for(const id of await adminIds())await bot.telegram.sendMessage(id,`🧹 <b>Contrôle des membres inactifs</b>\n\n${count} personne(s) sont dans le groupe depuis au moins ${config.INACTIVE_REVIEW_DAYS} jours et n’ont jamais démarré le bot.\n\nVeux-tu les retirer du groupe ? Elles ne seront pas bannies et pourront revenir.`,{parse_mode:'HTML',...kb}).catch(()=>{})}
+bot.on("text", async (ctx) => {
+  await ensureUser(ctx);
+  if (ctx.chat.type !== "private") return;
+  if (
+    (await isAdminUser(ctx.from.id)) &&
+    /^[+-]\s+\S+/.test(ctx.message.text)
+  ) {
+    const [op, ...parts] = ctx.message.text.trim().split(/\s+/);
+    const word = parts.join(" ").toLocaleLowerCase("fr-FR");
+    if (op === "+")
+      await db.query(
+        "INSERT INTO banned_words(word) VALUES($1) ON CONFLICT DO NOTHING",
+        [word],
+      );
+    else await db.query("DELETE FROM banned_words WHERE word=$1", [word]);
+    await audit(
+      ctx.from.id,
+      op === "+" ? "banned_word_added" : "banned_word_removed",
+      null,
+      { word },
+    );
+    return void (await ctx.reply(
+      `Mot « ${word} » ${op === "+" ? "ajouté" : "retiré"}.`,
+      adminKb,
+    ));
+  }
+  const s = await one<{ flow: string; step: string; data: any }>(
+    "SELECT * FROM sessions WHERE user_id=$1",
+    [ctx.from.id],
+  );
+  if (!s) return;
+  const text = ctx.message.text.trim();
+  if (
+    s.flow === "campaign_edit" &&
+    s.step === "value" &&
+    (await isAdminUser(ctx.from.id))
+  ) {
+    const id = Number(s.data.campaign_id),
+      field = String(s.data.field);
+    let value: string | number = text;
+    if (field === "target") {
+      value = Number(text);
+      if (!Number.isInteger(value) || value < 1)
+        return void (await ctx.reply(
+          "L’objectif doit être un nombre entier supérieur à 0.",
+        ));
+    }
+    const sql: Record<string, string> = {
+      title: "UPDATE campaigns SET title=$2 WHERE id=$1 AND deleted_at IS NULL",
+      description:
+        "UPDATE campaigns SET description=$2 WHERE id=$1 AND deleted_at IS NULL",
+      price_text:
+        "UPDATE campaigns SET price_text=$2 WHERE id=$1 AND deleted_at IS NULL",
+      target:
+        "UPDATE campaigns SET target=$2 WHERE id=$1 AND deleted_at IS NULL",
+    };
+    if (!sql[field])
+      return void (await ctx.reply("Champ de modification invalide.", adminKb));
+    await db.query(sql[field], [id, value]);
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    await audit(ctx.from.id, `campaign_${field}_updated`, id, { value });
+    const updated = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [
+      id,
+    ]);
+    if (updated?.status === "published") {
+      await removeAnnouncement(updated);
+      await publish(updated);
+    }
+    if (field === "target") {
+      const users = await many<{ telegram_id: string }>(
+        "SELECT telegram_id FROM users WHERE active_campaign_id=$1",
+        [id],
+      );
+      for (const u of users) await tryUnlock(Number(u.telegram_id));
+    }
+    return void (await ctx.reply(
+      "✅ Publication modifiée. L’annonce visible a été actualisée.",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("⬅️ Publication", `campaign_view_${id}`)],
+      ]),
+    ));
+  }
+  if (s.flow === "payment" && s.step === "proof")
+    return void (await ctx.reply(
+      "La preuve doit être envoyée sous forme de photo ou de document.",
+      back,
+    ));
+  if (
+    s.flow === "reissue" &&
+    s.step === "url" &&
+    (await isAdminUser(ctx.from.id))
+  ) {
+    if (!/^https?:\/\//.test(text))
+      return void (await ctx.reply(
+        "Le lien doit commencer par http:// ou https://",
+      ));
+    const cid = Number(s.data.campaign_id),
+      mode = s.data.mode as "pending" | "all";
+    const c = await one<Campaign>(
+      `UPDATE campaigns SET gofile_url=$2,release_version=release_version+1,content_status='active',link_expires_at=NULL WHERE id=$1 RETURNING *`,
+      [cid, text],
+    );
+    if (!c) return void (await ctx.reply("Publication introuvable.", adminKb));
+    const recipients =
+      mode === "all"
+        ? await many<{ user_id: string }>(
+            `SELECT user_id::text FROM entitlements WHERE campaign_id=$1`,
+            [cid],
+          )
+        : await many<{ user_id: string }>(
+            `SELECT DISTINCT user_id::text FROM reissue_requests WHERE campaign_id=$1 AND status='pending'`,
+            [cid],
+          );
+    let sent = 0,
+      failed = 0;
+    for (const r of recipients) {
+      const uid = Number(r.user_id);
+      try {
+        await bot.telegram.sendMessage(
+          uid,
+          `♻️ Nouveau lien disponible pour « ${c.title} » :\n${text}`,
+        );
+        await db.query(
+          `UPDATE entitlements SET delivered_url=$3,release_version=$4,delivered_at=now(),guarantee_until=now()+$5::int*interval '1 hour' WHERE user_id=$1 AND campaign_id=$2`,
+          [uid, cid, text, c.release_version, config.REISSUE_GUARANTEE_HOURS],
+        );
+        await db.query(
+          `UPDATE reissue_requests SET status='fulfilled',fulfilled_at=now() WHERE user_id=$1 AND campaign_id=$2 AND status='pending'`,
+          [uid, cid],
+        );
+        sent++;
+      } catch {
+        failed++;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    return void (await ctx.reply(
+      `✅ Nouvelle version enregistrée.\nEnvoyés : ${sent}\nÉchecs : ${failed}`,
+      adminKb,
+    ));
+  }
+  if (
+    s.flow === "broadcast" &&
+    s.step === "content" &&
+    (await isAdminUser(ctx.from.id))
+  ) {
+    const result = await runBroadcast(s.data.target, text);
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    await audit(ctx.from.id, "broadcast_sent", null, {
+      target: s.data.target,
+      ...result,
+    });
+    return void (await ctx.reply(
+      `✅ Broadcast terminé.\nEnvoyés : ${result.sent}\nÉchecs : ${result.failed}`,
+      adminKb,
+    ));
+  }
+  if (s.flow === "ad" && (await isAdminUser(ctx.from.id))) {
+    if (s.step === "name") {
+      await db.query(
+        `UPDATE sessions SET step='body',data=jsonb_build_object('name',$2::text) WHERE user_id=$1`,
+        [ctx.from.id, text],
+      );
+      return void (await ctx.reply("Envoie le texte de la publicité."));
+    }
+    if (s.step === "body") {
+      await db.query(
+        `UPDATE sessions SET step='media',data=data||jsonb_build_object('body',$2::text) WHERE user_id=$1`,
+        [ctx.from.id, text],
+      );
+      return void (await ctx.reply(
+        "Envoie une photo/vidéo, ou écris « passer » pour une pub texte.",
+      ));
+    }
+    if (s.step === "media" && text.toLowerCase() === "passer") {
+      await db.query(
+        `INSERT INTO scheduled_ads(name,body,created_by) VALUES($1,$2,$3)`,
+        [s.data.name, s.data.body, ctx.from.id],
+      );
+      await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+      return void (await ctx.reply(
+        "✅ Publicité ajoutée et activée dans la rotation.",
+        adminKb,
+      ));
+    }
+  }
+  if (s.flow === "report" && s.step === "body") {
+    const campaignId = Number(s.data.campaign_id);
+    await db.query(
+      `INSERT INTO reports(user_id,campaign_id,kind,body) VALUES($1,$2,$3,$4)`,
+      [ctx.from.id, campaignId, s.data.kind, text],
+    );
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    const c = await one<{ title: string }>(
+      "SELECT title FROM campaigns WHERE id=$1",
+      [campaignId],
+    );
+    for (const id of await adminIds())
+      await bot.telegram
+        .sendMessage(
+          id,
+          `🛟 Nouveau signalement de ${ctx.from.id}\n📁 ${c?.title ?? "#" + campaignId}\n${text}`,
+        )
+        .catch(() => {});
+    return void (await ctx.reply(
+      "Merci, ton signalement a été transmis.",
+      home(await isAdminUser(ctx.from.id)),
+    ));
+  }
+  if (s.flow !== "campaign" || !(await isAdminUser(ctx.from.id))) return;
+  if (s.step === "title") {
+    await db.query(
+      `UPDATE sessions SET step='description',data=jsonb_build_object('title',$2::text) WHERE user_id=$1`,
+      [ctx.from.id, text],
+    );
+    return void (await ctx.reply("Envoie maintenant la description."));
+  }
+  if (s.step === "description") {
+    await db.query(
+      `UPDATE sessions SET step='media',data=data||jsonb_build_object('description',$2::text) WHERE user_id=$1`,
+      [ctx.from.id, text],
+    );
+    return void (await ctx.reply(
+      "Envoie une photo/vidéo, ou écris « passer ».",
+    ));
+  }
+  if (s.step === "media" && text.toLowerCase() === "passer") {
+    await db.query(`UPDATE sessions SET step='type' WHERE user_id=$1`, [
+      ctx.from.id,
+    ]);
+    return void (await ctx.reply(
+      "Choisis le type d’accès.",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback("🆓 Gratuit", "ctype_free"),
+          Markup.button.callback("💳 Payant", "ctype_paid"),
+        ],
+        [Markup.button.callback("🎯 Invitation", "ctype_invite")],
+      ]),
+    ));
+  }
+  if (s.step === "target") {
+    const n = Number(text);
+    if (!Number.isInteger(n) || n < 1)
+      return void (await ctx.reply("Envoie un nombre entier supérieur à 0."));
+    await db.query(
+      `UPDATE sessions SET step='url',data=data||jsonb_build_object('target',$2::int) WHERE user_id=$1`,
+      [ctx.from.id, n],
+    );
+    return void (await ctx.reply("Envoie le lien GoFile."));
+  }
+  if (s.step === "price") {
+    await db.query(
+      `UPDATE sessions SET step='url',data=data||jsonb_build_object('price_text',$2::text) WHERE user_id=$1`,
+      [ctx.from.id, text],
+    );
+    return void (await ctx.reply("Envoie le lien GoFile."));
+  }
+  if (s.step === "url") {
+    if (!/^https?:\/\//.test(text))
+      return void (await ctx.reply(
+        "Le lien doit commencer par http:// ou https://",
+      ));
+    const d = s.data;
+    const r = await db.query(
+      `INSERT INTO campaigns(title,description,media_file_id,media_type,access_type,target,gofile_url,price_text,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [
+        d.title,
+        d.description,
+        d.media_file_id ?? null,
+        d.media_type ?? null,
+        d.access_type,
+        d.target ?? null,
+        text,
+        d.price_text ?? null,
+        ctx.from.id,
+      ],
+    );
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    return void (await ctx.reply(
+      "Vérifie puis publie.",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("🚀 Publier", `publish_${r.rows[0].id}`)],
+        [Markup.button.callback("⬅️ Administration", "admin")],
+      ]),
+    ));
+  }
+});
+bot.on(["photo", "video"], async (ctx) => {
+  if (ctx.chat.type !== "private") return;
+  const s = await one<{ flow: string; step: string; data: any }>(
+    "SELECT flow,step,data FROM sessions WHERE user_id=$1",
+    [ctx.from.id],
+  );
+  const photo = "photo" in ctx.message;
+  const id = photo
+    ? ctx.message.photo.at(-1)!.file_id
+    : ctx.message.video.file_id;
+  const mediaType = photo ? "photo" : "video";
+  const caption = ctx.message.caption?.trim() ?? "";
+  if (s?.flow === "payment" && s.step === "proof") {
+    if (!photo)
+      return void (await ctx.reply(
+        "Envoie une photo ou un document, pas une vidéo.",
+        back,
+      ));
+    return void (await receivePaymentProof(ctx, id, "photo"));
+  }
+  if (!(await isAdminUser(ctx.from.id))) return;
+  if (s?.flow === "campaign_edit" && s.step === "media") {
+    const campaignId = Number(s.data.campaign_id);
+    await db.query(
+      `UPDATE campaigns SET media_file_id=$2,media_type=$3 WHERE id=$1 AND deleted_at IS NULL`,
+      [campaignId, id, mediaType],
+    );
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    await audit(ctx.from.id, "campaign_media_updated", campaignId, {
+      mediaType,
+    });
+    const updated = await one<Campaign>("SELECT * FROM campaigns WHERE id=$1", [
+      campaignId,
+    ]);
+    if (updated?.status === "published") {
+      await removeAnnouncement(updated);
+      await publish(updated);
+    }
+    return void (await ctx.reply(
+      "✅ Média modifié et annonce actualisée.",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "⬅️ Publication",
+            `campaign_view_${campaignId}`,
+          ),
+        ],
+      ]),
+    ));
+  }
+  if (s?.flow === "broadcast" && s.step === "content") {
+    const body = caption || " ";
+    const result = await runBroadcast(s.data.target, body, id, mediaType);
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    await audit(ctx.from.id, "broadcast_sent", null, {
+      target: s.data.target,
+      mediaType,
+      ...result,
+    });
+    return void (await ctx.reply(
+      `✅ Broadcast terminé.\nEnvoyés : ${result.sent}\nÉchecs : ${result.failed}`,
+      adminKb,
+    ));
+  }
+  if (s?.flow === "ad" && s.step === "media") {
+    await db.query(
+      `INSERT INTO scheduled_ads(name,body,media_file_id,media_type,created_by) VALUES($1,$2,$3,$4,$5)`,
+      [s.data.name, s.data.body, id, mediaType, ctx.from.id],
+    );
+    await db.query("DELETE FROM sessions WHERE user_id=$1", [ctx.from.id]);
+    return void (await ctx.reply(
+      "✅ Publicité avec média ajoutée et activée.",
+      adminKb,
+    ));
+  }
+  if (s?.flow !== "campaign" || s.step !== "media") return;
+  await db.query(
+    `UPDATE sessions SET step='type',data=data||jsonb_build_object('media_file_id',$2::text,'media_type',$3::text) WHERE user_id=$1`,
+    [ctx.from.id, id, mediaType],
+  );
+  await ctx.reply(
+    "Média enregistré. Choisis le type d’accès.",
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("🆓 Gratuit", "ctype_free"),
+        Markup.button.callback("💳 Payant", "ctype_paid"),
+      ],
+      [Markup.button.callback("🎯 Invitation", "ctype_invite")],
+    ]),
+  );
+});
+bot.on("document", async (ctx) => {
+  if (ctx.chat.type !== "private") return;
+  await receivePaymentProof(ctx, ctx.message.document.file_id, "document");
+});
 
-async function validatePending(){const rows=await many<{id:number,invitee_id:string,inviter_id:string,campaign_id:string|null}>(`SELECT id,invitee_id,inviter_id,campaign_id FROM invite_joins WHERE status='pending' AND validate_at<=now() LIMIT 100`);for(const r of rows){try{const m=await bot.telegram.getChatMember(config.MAIN_GROUP_ID,Number(r.invitee_id));if(!['member','administrator','creator','restricted'].includes(m.status)){await db.query(`UPDATE invite_joins SET status='left' WHERE id=$1`,[r.id]);continue}const q=await db.query(`UPDATE invite_joins SET status='counted' WHERE id=$1 AND status='pending' RETURNING id`,[r.id]);if(!q.rowCount)continue;await db.query(`UPDATE users SET invite_total=invite_total+1,active_progress=CASE WHEN active_campaign_id=$2 THEN active_progress+1 ELSE active_progress END WHERE telegram_id=$1`,[r.inviter_id,r.campaign_id]);await tryUnlock(Number(r.inviter_id));const u=await one<{notifications:boolean,active_progress:number,active_campaign_id:string|null}>(`SELECT notifications,active_progress,active_campaign_id FROM users WHERE telegram_id=$1`,[r.inviter_id]);if(u?.notifications)await bot.telegram.sendMessage(Number(r.inviter_id),u.active_campaign_id&&u.active_campaign_id===r.campaign_id?`✅ Une invitation vient d’être validée.\nProgression actuelle : ${u.active_progress}`:'✅ Une invitation vient d’être validée.').catch(()=>{})}catch(e){console.error('validation',e)}}}
-async function publishNextAd(force=false){
- const client=await db.connect();let ad:Ad|undefined;let previousMessageId:number|null=null;
- try{await client.query('BEGIN');await client.query(`SELECT pg_advisory_xact_lock(731946)`);const setting=(await client.query<{value:{next_at:string|null,last_message_id:number|null,last_ad_id:number|null}}>(`SELECT value FROM app_settings WHERE key='ad_rotation' FOR UPDATE`)).rows[0];const state=setting?.value??{next_at:null,last_message_id:null,last_ad_id:null};if(!force&&state.next_at&&new Date(state.next_at)>new Date()){await client.query('ROLLBACK');return false}const picked=await client.query<Ad>(`SELECT * FROM scheduled_ads WHERE enabled=TRUE ORDER BY CASE WHEN id>$1 THEN 0 ELSE 1 END,id LIMIT 1`,[state.last_ad_id??0]);ad=picked.rows[0];if(!ad){await client.query('ROLLBACK');return false}previousMessageId=state.last_message_id;await client.query(`UPDATE app_settings SET value=jsonb_build_object('next_at',now()+interval '6 hours','last_message_id',NULL,'last_ad_id',$1::bigint),updated_at=now() WHERE key='ad_rotation'`,[ad.id]);await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
- if(previousMessageId)await bot.telegram.deleteMessage(config.MAIN_GROUP_ID,previousMessageId).catch(()=>{});const sent=await sendContent(config.MAIN_GROUP_ID,ad.body,ad.media_file_id,ad.media_type);await db.query(`UPDATE scheduled_ads SET last_sent_at=now() WHERE id=$1`,[ad.id]);await db.query(`UPDATE app_settings SET value=jsonb_set(value,'{last_message_id}',to_jsonb($1::bigint)),updated_at=now() WHERE key='ad_rotation'`,[sent.message_id]);return true;
+bot.on("chat_member", async (ctx) => {
+  if (ctx.chat.id !== config.MAIN_GROUP_ID) return;
+  const u = ctx.chatMember.new_chat_member.user;
+  const old = ctx.chatMember.old_chat_member.status,
+    newS = ctx.chatMember.new_chat_member.status;
+  if (
+    ["left", "kicked"].includes(old) &&
+    ["member", "restricted"].includes(newS)
+  ) {
+    const words = await many<{ word: string }>("SELECT word FROM banned_words");
+    const name = [u.first_name, u.last_name, u.username]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase("fr-FR");
+    const tokens: string[] = name.match(/[\p{L}\p{N}_]+/gu) ?? [];
+    const matched = words.find((w) =>
+      tokens.includes(w.word.toLocaleLowerCase("fr-FR")),
+    );
+    if (matched) {
+      await bot.telegram.banChatMember(config.MAIN_GROUP_ID, u.id);
+      await db.query(
+        `INSERT INTO banned_member_events(user_id,username,display_name,matched_word) VALUES($1,$2,$3,$4)`,
+        [
+          u.id,
+          u.username ?? null,
+          [u.first_name, u.last_name].filter(Boolean).join(" "),
+          matched.word,
+        ],
+      );
+      return;
+    }
+    await db.query(
+      `INSERT INTO group_members(user_id,started_bot,join_source) VALUES($1,EXISTS(SELECT 1 FROM users WHERE telegram_id=$1),'main') ON CONFLICT(user_id) DO UPDATE SET joined_at=now(),left_at=NULL,started_bot=group_members.started_bot OR EXCLUDED.started_bot,join_source='main',updated_at=now()`,
+      [u.id],
+    );
+    const link = ctx.chatMember.invite_link?.invite_link;
+    if (link) {
+      const owner = await one<{
+        owner_id: string;
+        active_campaign_id: string | null;
+      }>(
+        `SELECT l.owner_id,u.active_campaign_id FROM invite_links l JOIN users u ON u.telegram_id=l.owner_id WHERE l.invite_link=$1 AND l.revoked_at IS NULL`,
+        [link],
+      );
+      if (owner && Number(owner.owner_id) !== u.id) {
+        await db.query(
+          `UPDATE group_members SET join_source='personal',updated_at=now() WHERE user_id=$1`,
+          [u.id],
+        );
+        await db.query(
+          `INSERT INTO invite_joins(invitee_id,inviter_id,invite_link,validate_at,campaign_id) VALUES($1,$2,$3,now()+$4::int*interval '1 minute',$5) ON CONFLICT(invitee_id) DO NOTHING`,
+          [
+            u.id,
+            owner.owner_id,
+            link,
+            config.VALIDATION_MINUTES,
+            owner.active_campaign_id,
+          ],
+        );
+      }
+    }
+  } else if (
+    ["member", "restricted"].includes(old) &&
+    ["left", "kicked"].includes(newS)
+  ) {
+    await db.query(
+      `UPDATE invite_joins SET status='left' WHERE invitee_id=$1 AND status='pending'`,
+      [u.id],
+    );
+    await db.query(
+      `UPDATE group_members SET left_at=now(),updated_at=now() WHERE user_id=$1`,
+      [u.id],
+    );
+  }
+});
+bot.on("message", async (ctx) => {
+  if (ctx.chat.id !== config.MAIN_GROUP_ID) return;
+  if ("new_chat_members" in ctx.message || "left_chat_member" in ctx.message) {
+    await ctx.deleteMessage().catch(() => {});
+    return;
+  }
+  if (!(await isAdminUser(ctx.from?.id)))
+    await ctx.deleteMessage().catch(() => {});
+});
+bot.on("my_chat_member", async (ctx) => {
+  if (
+    ["member", "administrator"].includes(
+      ctx.myChatMember.new_chat_member.status,
+    ) &&
+    ctx.chat.id !== config.MAIN_GROUP_ID
+  )
+    await bot.telegram.leaveChat(ctx.chat.id).catch(() => {});
+});
+
+bot.action(/^cleanup_no_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const done = await db.query(
+    `UPDATE cleanup_batches SET status='skipped',decided_at=now(),decided_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,
+    [id, ctx.from.id],
+  );
+  if (!done.rowCount)
+    return void (await ctx.reply("Ce contrôle a déjà été traité."));
+  await db.query(
+    `UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$2::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup' AND (value->>'pending_batch_id')::bigint=$1`,
+    [id, config.INACTIVE_REVIEW_DAYS],
+  );
+  await audit(ctx.from.id, "inactive_cleanup_refused", null, { batchId: id });
+  await ctx.editMessageText(
+    `Aucun membre retiré. Un nouveau contrôle cumulatif sera proposé dans ${config.INACTIVE_REVIEW_DAYS} jours.`,
+  );
+});
+bot.action(/^cleanup_yes_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Nettoyage en cours…");
+  if (!(await isAdminUser(ctx.from.id))) return;
+  const id = Number(ctx.match[1]);
+  const claimed = await db.query(
+    `UPDATE cleanup_batches SET status='processing',decided_at=now(),decided_by=$2 WHERE id=$1 AND status='pending' RETURNING id`,
+    [id, ctx.from.id],
+  );
+  if (!claimed.rowCount)
+    return void (await ctx.reply("Ce contrôle a déjà été traité."));
+  const members = await many<{ user_id: string }>(
+    `SELECT bm.user_id FROM cleanup_batch_members bm JOIN group_members gm ON gm.user_id=bm.user_id WHERE bm.batch_id=$1 AND gm.started_bot=FALSE AND gm.left_at IS NULL`,
+    [id],
+  );
+  let removed = 0,
+    skipped = 0;
+  for (const row of members) {
+    const uid = Number(row.user_id);
+    try {
+      const member = await bot.telegram.getChatMember(
+        config.MAIN_GROUP_ID,
+        uid,
+      );
+      if (
+        member.status === "creator" ||
+        member.status === "administrator" ||
+        member.status === "left" ||
+        member.status === "kicked"
+      ) {
+        skipped++;
+        continue;
+      }
+      await bot.telegram.banChatMember(config.MAIN_GROUP_ID, uid);
+      await bot.telegram.unbanChatMember(config.MAIN_GROUP_ID, uid, {
+        only_if_banned: true,
+      });
+      await db.query(
+        `UPDATE group_members SET left_at=now(),updated_at=now() WHERE user_id=$1`,
+        [uid],
+      );
+      await db.query(
+        `UPDATE cleanup_batch_members SET removed=TRUE WHERE batch_id=$1 AND user_id=$2`,
+        [id, uid],
+      );
+      removed++;
+    } catch {
+      skipped++;
+    }
+  }
+  await db.query(
+    `UPDATE cleanup_batches SET status='completed',removed_count=$2 WHERE id=$1`,
+    [id, removed],
+  );
+  await db.query(
+    `UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$2::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,
+    [id, config.INACTIVE_REVIEW_DAYS],
+  );
+  await audit(ctx.from.id, "inactive_cleanup_approved", null, {
+    batchId: id,
+    removed,
+    skipped,
+  });
+  await ctx.editMessageText(
+    `✅ Nettoyage terminé.\nRetirés sans bannissement permanent : ${removed}\nIgnorés ou déjà partis : ${skipped}`,
+  );
+});
+
+async function reviewInactiveMembers() {
+  const client = await db.connect();
+  let batchId: number | null = null,
+    count = 0;
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT pg_advisory_xact_lock(731947)`);
+    const row = (
+      await client.query<{
+        value: { next_at: string | null; pending_batch_id: number | null };
+      }>(`SELECT value FROM app_settings WHERE key='member_cleanup' FOR UPDATE`)
+    ).rows[0];
+    const state = row?.value ?? { next_at: null, pending_batch_id: null };
+    if (state.pending_batch_id) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    if (!state.next_at) {
+      await client.query(
+        `UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$1::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,
+        [config.INACTIVE_REVIEW_DAYS],
+      );
+      await client.query("COMMIT");
+      return;
+    }
+    if (new Date(state.next_at) > new Date()) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const candidates = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM group_members WHERE started_bot=FALSE AND left_at IS NULL AND joined_at<=now()-$1::int*interval '1 day'`,
+      [config.INACTIVE_REVIEW_DAYS],
+    );
+    count = candidates.rowCount ?? 0;
+    if (!count) {
+      await client.query(
+        `UPDATE app_settings SET value=jsonb_build_object('next_at',now()+$1::int*interval '1 day','pending_batch_id',NULL),updated_at=now() WHERE key='member_cleanup'`,
+        [config.INACTIVE_REVIEW_DAYS],
+      );
+      await client.query("COMMIT");
+      return;
+    }
+    const batch = (
+      await client.query<{ id: number }>(
+        `INSERT INTO cleanup_batches(detected_count) VALUES($1) RETURNING id`,
+        [count],
+      )
+    ).rows[0];
+    if (!batch) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    batchId = batch.id;
+    for (const c of candidates.rows)
+      await client.query(
+        `INSERT INTO cleanup_batch_members(batch_id,user_id) VALUES($1,$2)`,
+        [batchId, c.user_id],
+      );
+    await client.query(
+      `UPDATE app_settings SET value=jsonb_build_object('next_at',NULL,'pending_batch_id',$1::bigint),updated_at=now() WHERE key='member_cleanup'`,
+      [batchId],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (!batchId) return;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        `✅ Oui, retirer les ${count}`,
+        `cleanup_yes_${batchId}`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "❌ Non, conserver et recompter plus tard",
+        `cleanup_no_${batchId}`,
+      ),
+    ],
+  ]);
+  for (const id of await adminIds())
+    await bot.telegram
+      .sendMessage(
+        id,
+        `🧹 <b>Contrôle des membres inactifs</b>\n\n${count} personne(s) sont dans le groupe depuis au moins ${config.INACTIVE_REVIEW_DAYS} jours et n’ont jamais démarré le bot.\n\nVeux-tu les retirer du groupe ? Elles ne seront pas bannies et pourront revenir.`,
+        { parse_mode: "HTML", ...kb },
+      )
+      .catch(() => {});
 }
-async function startup(){const me=await bot.telegram.getMe();const member=await bot.telegram.getChatMember(config.MAIN_GROUP_ID,me.id);if(member.status!=='administrator')throw new Error('Le bot doit être administrateur du groupe principal.');await bot.telegram.setChatPermissions(config.MAIN_GROUP_ID,{can_send_messages:false,can_send_audios:false,can_send_documents:false,can_send_photos:false,can_send_videos:false,can_send_video_notes:false,can_send_voice_notes:false,can_send_polls:false,can_send_other_messages:false,can_add_web_page_previews:false,can_change_info:false,can_invite_users:false,can_pin_messages:false,can_manage_topics:false});await bot.launch({allowedUpdates:['message','callback_query','chat_member','my_chat_member']});setInterval(validatePending,30_000);setInterval(()=>publishNextAd().catch(e=>console.error('ad rotation',e)),60_000);setInterval(()=>reviewInactiveMembers().catch(e=>console.error('inactive review',e)),60_000);await publishNextAd().catch(e=>console.error('ad startup',e));await reviewInactiveMembers().catch(e=>console.error('inactive startup',e));console.log(`@${me.username} started`)}
-process.once('SIGINT',()=>bot.stop('SIGINT'));process.once('SIGTERM',()=>bot.stop('SIGTERM'));startup().catch(e=>{console.error(e);process.exit(1)});
-bot.catch(async(error,ctx)=>{console.error('Telegram update failed',error);if(ctx.chat?.type==='private')await ctx.reply('Une erreur technique est survenue. Réessaie ou reviens au menu avec /start.').catch(()=>{})});
+
+async function validatePending() {
+  const rows = await many<{
+    id: number;
+    invitee_id: string;
+    inviter_id: string;
+    campaign_id: string | null;
+  }>(
+    `SELECT id,invitee_id,inviter_id,campaign_id FROM invite_joins WHERE status='pending' AND validate_at<=now() LIMIT 100`,
+  );
+  for (const r of rows) {
+    try {
+      const m = await bot.telegram.getChatMember(
+        config.MAIN_GROUP_ID,
+        Number(r.invitee_id),
+      );
+      if (
+        !["member", "administrator", "creator", "restricted"].includes(m.status)
+      ) {
+        await db.query(`UPDATE invite_joins SET status='left' WHERE id=$1`, [
+          r.id,
+        ]);
+        continue;
+      }
+      const q = await db.query(
+        `UPDATE invite_joins SET status='counted' WHERE id=$1 AND status='pending' RETURNING id`,
+        [r.id],
+      );
+      if (!q.rowCount) continue;
+      await db.query(
+        `UPDATE users SET invite_total=invite_total+1,active_progress=CASE WHEN active_campaign_id=$2 THEN active_progress+1 ELSE active_progress END WHERE telegram_id=$1`,
+        [r.inviter_id, r.campaign_id],
+      );
+      await tryUnlock(Number(r.inviter_id));
+      const u = await one<{
+        notifications: boolean;
+        active_progress: number;
+        active_campaign_id: string | null;
+      }>(
+        `SELECT notifications,active_progress,active_campaign_id FROM users WHERE telegram_id=$1`,
+        [r.inviter_id],
+      );
+      if (u?.notifications)
+        await bot.telegram
+          .sendMessage(
+            Number(r.inviter_id),
+            u.active_campaign_id && u.active_campaign_id === r.campaign_id
+              ? `✅ Une invitation vient d’être validée.\nProgression actuelle : ${u.active_progress}`
+              : "✅ Une invitation vient d’être validée.",
+          )
+          .catch(() => {});
+    } catch (e) {
+      console.error("validation", e);
+    }
+  }
+}
+async function publishNextAd(force = false) {
+  const client = await db.connect();
+  let ad: Ad | undefined;
+  let previousMessageId: number | null = null;
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT pg_advisory_xact_lock(731946)`);
+    const setting = (
+      await client.query<{
+        value: {
+          next_at: string | null;
+          last_message_id: number | null;
+          last_ad_id: number | null;
+        };
+      }>(`SELECT value FROM app_settings WHERE key='ad_rotation' FOR UPDATE`)
+    ).rows[0];
+    const state = setting?.value ?? {
+      next_at: null,
+      last_message_id: null,
+      last_ad_id: null,
+    };
+    if (!force && state.next_at && new Date(state.next_at) > new Date()) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    const picked = await client.query<Ad>(
+      `SELECT * FROM scheduled_ads WHERE enabled=TRUE ORDER BY CASE WHEN id>$1 THEN 0 ELSE 1 END,id LIMIT 1`,
+      [state.last_ad_id ?? 0],
+    );
+    ad = picked.rows[0];
+    if (!ad) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    previousMessageId = state.last_message_id;
+    await client.query(
+      `UPDATE app_settings SET value=jsonb_build_object('next_at',now()+interval '6 hours','last_message_id',NULL,'last_ad_id',$1::bigint),updated_at=now() WHERE key='ad_rotation'`,
+      [ad.id],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (previousMessageId)
+    await bot.telegram
+      .deleteMessage(config.MAIN_GROUP_ID, previousMessageId)
+      .catch(() => {});
+  const sent = await sendContent(
+    config.MAIN_GROUP_ID,
+    ad.body,
+    ad.media_file_id,
+    ad.media_type,
+  );
+  await db.query(`UPDATE scheduled_ads SET last_sent_at=now() WHERE id=$1`, [
+    ad.id,
+  ]);
+  await db.query(
+    `UPDATE app_settings SET value=jsonb_set(value,'{last_message_id}',to_jsonb($1::bigint)),updated_at=now() WHERE key='ad_rotation'`,
+    [sent.message_id],
+  );
+  return true;
+}
+async function startup() {
+  const me = await bot.telegram.getMe();
+  const member = await bot.telegram.getChatMember(config.MAIN_GROUP_ID, me.id);
+  if (member.status !== "administrator")
+    throw new Error("Le bot doit être administrateur du groupe principal.");
+  await bot.telegram.setChatPermissions(config.MAIN_GROUP_ID, {
+    can_send_messages: false,
+    can_send_audios: false,
+    can_send_documents: false,
+    can_send_photos: false,
+    can_send_videos: false,
+    can_send_video_notes: false,
+    can_send_voice_notes: false,
+    can_send_polls: false,
+    can_send_other_messages: false,
+    can_add_web_page_previews: false,
+    can_change_info: false,
+    can_invite_users: false,
+    can_pin_messages: false,
+    can_manage_topics: false,
+  });
+  await bot.launch({
+    allowedUpdates: [
+      "message",
+      "callback_query",
+      "chat_member",
+      "my_chat_member",
+    ],
+  });
+  setInterval(validatePending, 30_000);
+  setInterval(
+    () => publishNextAd().catch((e) => console.error("ad rotation", e)),
+    60_000,
+  );
+  setInterval(
+    () =>
+      reviewInactiveMembers().catch((e) => console.error("inactive review", e)),
+    60_000,
+  );
+  await publishNextAd().catch((e) => console.error("ad startup", e));
+  await reviewInactiveMembers().catch((e) =>
+    console.error("inactive startup", e),
+  );
+  console.log(`@${me.username} started`);
+}
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
+startup().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+bot.catch(async (error, ctx) => {
+  console.error("Telegram update failed", error);
+  if (ctx.chat?.type === "private")
+    await ctx
+      .reply(
+        "Une erreur technique est survenue. Réessaie ou reviens au menu avec /start.",
+      )
+      .catch(() => {});
+});

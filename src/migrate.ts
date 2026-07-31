@@ -1,4 +1,4 @@
-import { db } from './db.js';
+import { db } from "./db.js";
 const sql = `
 CREATE TABLE IF NOT EXISTS users(
  telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT NOT NULL DEFAULT '', notifications BOOLEAN NOT NULL DEFAULT TRUE,
@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS cleanup_batch_members(
  removed BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(batch_id,user_id)
 );
 CREATE TABLE IF NOT EXISTS banned_words(word TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS banned_member_events(
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, username TEXT, display_name TEXT NOT NULL DEFAULT '',
+ matched_word TEXT NOT NULL, banned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS sessions(user_id BIGINT PRIMARY KEY, flow TEXT NOT NULL, step TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS scheduled_ads(
  id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, body TEXT NOT NULL, media_file_id TEXT, media_type TEXT,
@@ -100,5 +104,8 @@ CREATE INDEX IF NOT EXISTS invite_joins_pending_idx ON invite_joins(status,valid
 CREATE INDEX IF NOT EXISTS campaign_events_stats_idx ON campaign_events(campaign_id,event_type,created_at);
 CREATE INDEX IF NOT EXISTS admin_audit_recent_idx ON admin_audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS group_members_cleanup_idx ON group_members(started_bot,left_at,joined_at);
+CREATE INDEX IF NOT EXISTS banned_member_events_user_idx ON banned_member_events(user_id,banned_at DESC);
 `;
-await db.query(sql); await db.end(); console.log('Database ready');
+await db.query(sql);
+await db.end();
+console.log("Database ready");
