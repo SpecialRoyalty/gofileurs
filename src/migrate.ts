@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS campaigns(
 );
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS content_status TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS link_expires_at TIMESTAMPTZ;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='active_progress') THEN
   ALTER TABLE users ADD COLUMN active_progress INT NOT NULL DEFAULT 0;
@@ -57,6 +58,12 @@ CREATE TABLE IF NOT EXISTS reissue_requests(
 CREATE TABLE IF NOT EXISTS reports(
  id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id), campaign_id BIGINT REFERENCES campaigns(id),
  kind TEXT NOT NULL CHECK(kind IN ('bug','problem')), body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS payment_requests(
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id), campaign_id BIGINT NOT NULL REFERENCES campaigns(id),
+ proof_file_id TEXT NOT NULL, proof_type TEXT NOT NULL CHECK(proof_type IN ('photo','document')),
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), reviewed_at TIMESTAMPTZ, reviewed_by BIGINT
 );
 CREATE TABLE IF NOT EXISTS banned_words(word TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS sessions(user_id BIGINT PRIMARY KEY, flow TEXT NOT NULL, step TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
