@@ -2,7 +2,6 @@ import { Markup } from 'telegraf';
 export const home = (admin=false) => Markup.inlineKeyboard([
   [Markup.button.callback('📦 Mes accès','access'),Markup.button.callback('🎯 Invitations','invites')],
   [Markup.button.callback('🔔 Notifications','notifications')],
-  [Markup.button.callback('🛟 Signaler un problème','report')],
   ...(admin ? [[Markup.button.callback('🛠 Administration','admin')]] : [])
 ]);
 export const back = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Retour','home')]]);

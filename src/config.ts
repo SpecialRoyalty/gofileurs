@@ -8,5 +8,6 @@ const schema = z.object({
   PAYMENT_TEXT: z.string().default('Après paiement, envoie la preuve à l’administrateur.'),
   VALIDATION_MINUTES: z.coerce.number().int().min(1).default(10),
   REISSUE_GUARANTEE_HOURS: z.coerce.number().int().min(1).default(72),
+  INACTIVE_REVIEW_DAYS: z.coerce.number().int().min(1).default(3),
 });
 export const config = schema.parse(process.env);

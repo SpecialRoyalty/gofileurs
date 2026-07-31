@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs(
  id BIGSERIAL PRIMARY KEY, admin_id BIGINT NOT NULL, campaign_id BIGINT REFERENCES campaigns(id) ON DELETE SET NULL,
  action TEXT NOT NULL, details JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS group_members(
+ user_id BIGINT PRIMARY KEY, joined_at TIMESTAMPTZ NOT NULL DEFAULT now(), left_at TIMESTAMPTZ,
+ started_bot BOOLEAN NOT NULL DEFAULT FALSE, join_source TEXT NOT NULL DEFAULT 'main', updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS cleanup_batches(
+ id BIGSERIAL PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','completed','skipped')),
+ detected_count INT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), decided_at TIMESTAMPTZ, decided_by BIGINT, removed_count INT
+);
+CREATE TABLE IF NOT EXISTS cleanup_batch_members(
+ batch_id BIGINT NOT NULL REFERENCES cleanup_batches(id) ON DELETE CASCADE, user_id BIGINT NOT NULL,
+ removed BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(batch_id,user_id)
+);
 CREATE TABLE IF NOT EXISTS banned_words(word TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS sessions(user_id BIGINT PRIMARY KEY, flow TEXT NOT NULL, step TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}', updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS scheduled_ads(
@@ -83,8 +95,10 @@ CREATE TABLE IF NOT EXISTS scheduled_ads(
 );
 CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 INSERT INTO app_settings(key,value) VALUES('ad_rotation','{"next_at":null,"last_message_id":null,"last_ad_id":null}') ON CONFLICT(key) DO NOTHING;
+INSERT INTO app_settings(key,value) VALUES('member_cleanup','{"next_at":null,"pending_batch_id":null}') ON CONFLICT(key) DO NOTHING;
 CREATE INDEX IF NOT EXISTS invite_joins_pending_idx ON invite_joins(status,validate_at);
 CREATE INDEX IF NOT EXISTS campaign_events_stats_idx ON campaign_events(campaign_id,event_type,created_at);
 CREATE INDEX IF NOT EXISTS admin_audit_recent_idx ON admin_audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS group_members_cleanup_idx ON group_members(started_bot,left_at,joined_at);
 `;
 await db.query(sql); await db.end(); console.log('Database ready');
