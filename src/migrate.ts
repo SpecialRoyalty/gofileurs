@@ -27,6 +27,19 @@ CREATE TABLE IF NOT EXISTS entitlements(
  campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'granted',
  granted_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(user_id,campaign_id)
 );
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS release_version INT NOT NULL DEFAULT 1;
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS delivered_url TEXT;
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS release_version INT NOT NULL DEFAULT 1;
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS guarantee_until TIMESTAMPTZ;
+UPDATE entitlements e SET delivered_url=c.gofile_url FROM campaigns c WHERE c.id=e.campaign_id AND e.delivered_url IS NULL;
+CREATE TABLE IF NOT EXISTS reissue_requests(
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, release_version INT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','fulfilled','rejected')),
+ requested_at TIMESTAMPTZ NOT NULL DEFAULT now(), fulfilled_at TIMESTAMPTZ,
+ UNIQUE(user_id,campaign_id,release_version)
+);
 CREATE TABLE IF NOT EXISTS reports(
  id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id), campaign_id BIGINT REFERENCES campaigns(id),
  kind TEXT NOT NULL CHECK(kind IN ('bug','problem')), body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at TIMESTAMPTZ NOT NULL DEFAULT now()

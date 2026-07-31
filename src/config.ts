@@ -8,6 +8,7 @@ const schema = z.object({
   PAYPAL_URL: z.string().url().optional(), REVOLUT_URL: z.string().url().optional(),
   PAYMENT_TEXT: z.string().default('Après paiement, envoie la preuve à l’administrateur.'),
   VALIDATION_MINUTES: z.coerce.number().int().min(1).default(10),
+  REISSUE_GUARANTEE_HOURS: z.coerce.number().int().min(1).default(72),
 });
 export const config = schema.parse(process.env);
 export const isAdmin = (id?: number) => !!id && config.ADMIN_IDS.includes(id);

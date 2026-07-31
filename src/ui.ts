@@ -9,6 +9,7 @@ export const back = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Retou
 export const admin = Markup.inlineKeyboard([
  [Markup.button.callback('➕ Publier un GoFile','new_campaign')],
  [Markup.button.callback('📣 Broadcast','broadcast'),Markup.button.callback('⏱ Pubs automatiques','ads')],
+ [Markup.button.callback('♻️ Liens expirés','reissues')],
  [Markup.button.callback('📋 Publications','campaigns'),Markup.button.callback('🚫 Mots interdits','words')],
  [Markup.button.callback('📨 Signalements','reports')],[Markup.button.callback('⬅️ Retour','home')]
 ]);
