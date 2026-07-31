@@ -16,7 +16,7 @@ Bot privé + groupe Telegram, déployable sur Railway avec PostgreSQL. Il verrou
 3. Dans les variables du service bot, renseigne les valeurs de `.env.example`. Railway fournit `DATABASE_URL` automatiquement si la base est liée.
 4. Déploie. La commande de démarrage applique le schéma SQL avant de lancer le bot.
 
-Variables obligatoires : `BOT_TOKEN`, `ADMIN_IDS` (plusieurs IDs séparés par des virgules), `MAIN_GROUP_ID`, `DATABASE_URL`. Variables paiement : `PAYPAL_URL`, `REVOLUT_URL`, `PAYMENT_TEXT`.
+Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables paiement : `PAYPAL_URL`, `REVOLUT_URL`, `PAYMENT_TEXT`. Les administrateurs sont détectés automatiquement à partir des administrateurs Telegram du groupe principal ; aucun identifiant administrateur ne doit être configuré.
 
 `REISSUE_GUARANTEE_HOURS` règle la durée pendant laquelle un bénéficiaire peut utiliser le bouton **Lien expiré** (72 heures par défaut). Chaque livraison mémorise sa version : une demande identique ne peut pas être créée deux fois et un ancien bénéficiaire ne reçoit jamais silencieusement une version plus récente.
 
