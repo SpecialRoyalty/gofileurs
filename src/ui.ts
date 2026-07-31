@@ -11,5 +11,5 @@ export const admin = Markup.inlineKeyboard([
  [Markup.button.callback('📣 Broadcast','broadcast'),Markup.button.callback('⏱ Pubs automatiques','ads')],
  [Markup.button.callback('♻️ Liens expirés','reissues')],
  [Markup.button.callback('📋 Publications','campaigns'),Markup.button.callback('🚫 Mots interdits','words')],
- [Markup.button.callback('📨 Signalements','reports')],[Markup.button.callback('⬅️ Retour','home')]
+ [Markup.button.callback('📨 Signalements','reports'),Markup.button.callback('🧾 Historique','audit_logs')],[Markup.button.callback('⬅️ Retour','home')]
 ]);
