@@ -35,9 +35,10 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 - Admin → **Mots interdits** : envoie `+ cp` pour ajouter le mot entier `cp`, ou `- cp` pour le retirer. Ainsi `sell cp now` est rejeté, tandis que `jscpquoi` reste accepté.
 - Après **J’ai payé**, le membre doit obligatoirement envoyer une preuve en photo ou document. L’admin reçoit la preuve avec les boutons de validation ; une demande ne peut être validée qu’une fois.
 - Dans **Mes accès**, un objectif actif affiche sa progression (`Titre — 20/30 invitations`). Sa fiche contient le média, les informations et un abandon avec confirmation.
-- Le signalement est rattaché à chaque dossier débloqué dans **Mes accès**. Il est toujours permis pour un accès payant ou invitation et pour le premier accès gratuit. À partir du deuxième accès gratuit, il exige au moins une invitation validée.
+- Dans **Mes accès**, la liste garde un seul bouton par dossier. Un clic ouvre sa fiche complète (média, titre, description et type) avec **Ouvrir le lien** et **Signaler**.
+- **Signaler** propose **Bug** (le membre écrit son message, transmis aux admins avec le dossier concerné) ou **Lien mort** (ajout à la file de rediffusion). Le signalement est toujours permis pour un accès payant ou invitation et pour le premier accès gratuit. À partir du deuxième accès gratuit, il exige au moins une invitation validée.
 - Renoncer remet définitivement la progression active à zéro. Reprendre cet objectif ou en choisir un autre commence à `0` ; aucun avancement n’est transféré.
-- Un contenu débloqué peut être signalé comme indisponible uniquement lorsque son statut ou sa date d’expiration le justifie. Admin → **Liens expirés** permet de remplacer puis rediffuser le lien.
+- Un lien mort peut être signalé pendant la garantie de rediffusion. Une demande unique est créée pour le membre, le dossier et sa version ; les clics répétés ne créent aucun doublon. Admin → **Liens expirés** affiche les attentes. Quand l’admin remplace le lien, le bot le renvoie automatiquement aux membres en attente, actualise leur version et leur garantie, puis clôt leurs demandes. Un seul signalement ne désactive pas automatiquement le dossier pour tous : l’admin garde cette décision dans la fiche publication.
 
 ## Sécurité et limites Telegram
 
