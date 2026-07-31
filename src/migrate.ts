@@ -11,6 +11,14 @@ CREATE TABLE IF NOT EXISTS campaigns(
  price_text TEXT, status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','closed')),
  message_id BIGINT, created_by BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), published_at TIMESTAMPTZ
 );
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS content_status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS link_expires_at TIMESTAMPTZ;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='active_progress') THEN
+  ALTER TABLE users ADD COLUMN active_progress INT NOT NULL DEFAULT 0;
+  UPDATE users SET active_progress=invite_balance WHERE active_campaign_id IS NOT NULL;
+ END IF;
+END $$;
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_active_campaign_id_fkey;
 ALTER TABLE users ADD CONSTRAINT users_active_campaign_id_fkey FOREIGN KEY(active_campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL;
 CREATE TABLE IF NOT EXISTS invite_links(
@@ -22,6 +30,12 @@ CREATE TABLE IF NOT EXISTS invite_joins(
  invite_link TEXT NOT NULL, joined_at TIMESTAMPTZ NOT NULL DEFAULT now(), validate_at TIMESTAMPTZ NOT NULL,
  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','counted','left','rejected')), UNIQUE(invitee_id)
 );
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='invite_joins' AND column_name='campaign_id') THEN
+  ALTER TABLE invite_joins ADD COLUMN campaign_id BIGINT REFERENCES campaigns(id) ON DELETE SET NULL;
+  UPDATE invite_joins j SET campaign_id=u.active_campaign_id FROM users u WHERE j.inviter_id=u.telegram_id AND j.status='pending';
+ END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS entitlements(
  id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
  campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'granted',
