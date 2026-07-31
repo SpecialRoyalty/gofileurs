@@ -20,6 +20,8 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 
 `REISSUE_GUARANTEE_HOURS` règle la durée de garantie d’une livraison (72 heures par défaut). Le bouton d’indisponibilité n’apparaît que lorsque le contenu est réellement désactivé ou que sa date d’expiration est dépassée. Chaque livraison mémorise sa version.
 
+`INACTIVE_REVIEW_DAYS` règle le contrôle des membres n’ayant jamais démarré le bot (3 jours par défaut).
+
 ## Utilisation
 
 - En privé : `/start` ouvre l’interface membre ou administrateur.
@@ -33,6 +35,7 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 - Admin → **Mots interdits** : envoie `+ cp` pour ajouter le mot entier `cp`, ou `- cp` pour le retirer. Ainsi `sell cp now` est rejeté, tandis que `jscpquoi` reste accepté.
 - Après **J’ai payé**, le membre doit obligatoirement envoyer une preuve en photo ou document. L’admin reçoit la preuve avec les boutons de validation ; une demande ne peut être validée qu’une fois.
 - Dans **Mes accès**, un objectif actif affiche sa progression (`Titre — 20/30 invitations`). Sa fiche contient le média, les informations et un abandon avec confirmation.
+- Le signalement est rattaché à chaque dossier débloqué dans **Mes accès**. Il est toujours permis pour un accès payant ou invitation et pour le premier accès gratuit. À partir du deuxième accès gratuit, il exige au moins une invitation validée.
 - Renoncer remet définitivement la progression active à zéro. Reprendre cet objectif ou en choisir un autre commence à `0` ; aucun avancement n’est transféré.
 - Un contenu débloqué peut être signalé comme indisponible uniquement lorsque son statut ou sa date d’expiration le justifie. Admin → **Liens expirés** permet de remplacer puis rediffuser le lien.
 
@@ -43,6 +46,8 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 - Les messages ordinaires des non-admins et les messages d’entrée/sortie sont supprimés.
 - Telegram ne livre l’information du lien utilisé que si le bot reçoit les mises à jour `chat_member`; elles sont activées ici.
 - Un utilisateur déjà vu comme invité n’est compté qu’une fois, même s’il quitte puis revient.
+- Un invité qui quitte avant la validation interne n’est pas compté. Une invitation déjà validée reste acquise si la personne quitte plus tard. Les membres arrivés par le lien principal ne sont attribués à aucun parrain. Le bot ne peut pas connaître la dernière connexion ou les lectures Telegram et n’expulse donc personne automatiquement pour « inactivité ».
+- Pour les arrivées observées après l’installation de cette fonction, le bot demande périodiquement aux administrateurs s’ils souhaitent retirer les membres présents depuis le délai configuré qui n’ont jamais lancé `/start`. Un refus conserve et cumule la liste au contrôle suivant. Une acceptation les retire sans bannissement permanent. Telegram ne permet pas de découvrir rétroactivement tous les membres déjà présents.
 
 ## Développement local
 
