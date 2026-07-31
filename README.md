@@ -25,6 +25,9 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 - En privé : `/start` ouvre l’interface membre ou administrateur.
 - Admin → **Publier un GoFile** : titre, description, média facultatif, type d’accès, objectif/prix et lien.
 - Admin → **Publications** : ouvre la fiche complète d’une publication avec son média, puis permet de republier, masquer/réactiver, changer la disponibilité du GoFile ou supprimer définitivement. Une suppression retire l’annonce et empêche tout nouvel accès, tout en conservant les accès déjà acquis et l’historique.
+- Chaque fiche publication contient des **statistiques** : clics totaux et uniques, ouvertures privées traçables, déblocages, objectifs actifs et paiements par statut. Telegram ne fournit pas au bot les impressions réelles du message dans le groupe.
+- **Modifier** permet de changer le titre, la description, le média, le prix d’une offre payante ou l’objectif d’une offre invitation sans recréer la campagne. Si elle est visible, son annonce est automatiquement actualisée.
+- Admin → **Historique** affiche les actions récentes avec l’administrateur, la publication et la date : publication, modification, disponibilité, paiement, désactivation, réactivation et suppression.
 - Admin → **Broadcast** : envoie immédiatement un texte, une photo ou une vidéo soit dans le groupe, soit à tous les membres ayant déjà ouvert le bot. Les utilisateurs qui ont bloqué le bot sont ignorés sans interrompre l’envoi.
 - Admin → **Pubs automatiques** : crée plusieurs publicités et active/désactive chacune. Toutes les 6 heures, le bot publie la prochaine publicité active de la rotation et supprime le message publicitaire précédent, de sorte qu’une seule pub automatique reste visible dans le groupe.
 - Admin → **Mots interdits** : envoie `+ cp` pour ajouter le mot entier `cp`, ou `- cp` pour le retirer. Ainsi `sell cp now` est rejeté, tandis que `jscpquoi` reste accepté.
