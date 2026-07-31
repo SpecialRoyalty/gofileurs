@@ -7,7 +7,7 @@ Bot privé + groupe Telegram, déployable sur Railway avec PostgreSQL. Il verrou
 1. Crée le bot avec `@BotFather`, puis désactive **Group Privacy** (`/setprivacy` → Disable).
 2. Ajoute le bot au groupe principal comme administrateur.
 3. Donne-lui les droits : supprimer les messages, bannir/restreindre, inviter via lien et modifier les permissions.
-4. Récupère l’identifiant numérique du groupe (format `-100...`) et ton identifiant Telegram.
+4. Récupère l’identifiant numérique du groupe (format `-100...`).
 
 ## Déploiement Railway
 
@@ -18,7 +18,7 @@ Bot privé + groupe Telegram, déployable sur Railway avec PostgreSQL. Il verrou
 
 Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables paiement : `PAYPAL_URL`, `REVOLUT_URL`, `PAYMENT_TEXT`. Les administrateurs sont détectés automatiquement à partir des administrateurs Telegram du groupe principal ; aucun identifiant administrateur ne doit être configuré.
 
-`REISSUE_GUARANTEE_HOURS` règle la durée pendant laquelle un bénéficiaire peut utiliser le bouton **Lien expiré** (72 heures par défaut). Chaque livraison mémorise sa version : une demande identique ne peut pas être créée deux fois et un ancien bénéficiaire ne reçoit jamais silencieusement une version plus récente.
+`REISSUE_GUARANTEE_HOURS` règle la durée de garantie d’une livraison (72 heures par défaut). Le bouton d’indisponibilité n’apparaît que lorsque le contenu est réellement désactivé ou que sa date d’expiration est dépassée. Chaque livraison mémorise sa version.
 
 ## Utilisation
 
@@ -28,8 +28,9 @@ Variables obligatoires : `BOT_TOKEN`, `MAIN_GROUP_ID`, `DATABASE_URL`. Variables
 - Admin → **Pubs automatiques** : crée plusieurs publicités et active/désactive chacune. Toutes les 6 heures, le bot publie la prochaine publicité active de la rotation et supprime le message publicitaire précédent, de sorte qu’une seule pub automatique reste visible dans le groupe.
 - Admin → **Mots interdits** : envoie `+ cp` pour ajouter le mot entier `cp`, ou `- cp` pour le retirer. Ainsi `sell cp now` est rejeté, tandis que `jscpquoi` reste accepté.
 - Un accès payant n’est livré qu’après validation manuelle par un admin.
-- Dans **Mes accès**, le membre peut signaler un lien expiré pendant la garantie. Admin → **Liens expirés** permet de remplacer le lien et de le renvoyer aux demandes en attente, ou exceptionnellement à tous les bénéficiaires. Seuls les envois réussis sont marqués comme rediffusés.
-- Renoncer à un objectif conserve le solde d’invitations déjà validées. Lorsqu’un objectif consomme 20 invitations sur un solde de 21, le solde suivant vaut 1.
+- Dans **Mes accès**, un objectif actif affiche sa progression (`Titre — 20/30 invitations`). Sa fiche contient le média, les informations et un abandon avec confirmation.
+- Renoncer remet définitivement la progression active à zéro. Reprendre cet objectif ou en choisir un autre commence à `0` ; aucun avancement n’est transféré.
+- Un contenu débloqué peut être signalé comme indisponible uniquement lorsque son statut ou sa date d’expiration le justifie. Admin → **Liens expirés** permet de remplacer puis rediffuser le lien.
 
 ## Sécurité et limites Telegram
 
