@@ -18,6 +18,8 @@ Bot privé + groupe Telegram, déployable sur Railway avec PostgreSQL. Il verrou
 
 Variables obligatoires : `BOT_TOKEN`, `ADMIN_IDS` (plusieurs IDs séparés par des virgules), `MAIN_GROUP_ID`, `DATABASE_URL`. Variables paiement : `PAYPAL_URL`, `REVOLUT_URL`, `PAYMENT_TEXT`.
 
+`REISSUE_GUARANTEE_HOURS` règle la durée pendant laquelle un bénéficiaire peut utiliser le bouton **Lien expiré** (72 heures par défaut). Chaque livraison mémorise sa version : une demande identique ne peut pas être créée deux fois et un ancien bénéficiaire ne reçoit jamais silencieusement une version plus récente.
+
 ## Utilisation
 
 - En privé : `/start` ouvre l’interface membre ou administrateur.
@@ -26,6 +28,7 @@ Variables obligatoires : `BOT_TOKEN`, `ADMIN_IDS` (plusieurs IDs séparés par d
 - Admin → **Pubs automatiques** : crée plusieurs publicités et active/désactive chacune. Toutes les 6 heures, le bot publie la prochaine publicité active de la rotation et supprime le message publicitaire précédent, de sorte qu’une seule pub automatique reste visible dans le groupe.
 - Admin → **Mots interdits** : envoie `+ cp` pour ajouter le mot entier `cp`, ou `- cp` pour le retirer. Ainsi `sell cp now` est rejeté, tandis que `jscpquoi` reste accepté.
 - Un accès payant n’est livré qu’après validation manuelle par un admin.
+- Dans **Mes accès**, le membre peut signaler un lien expiré pendant la garantie. Admin → **Liens expirés** permet de remplacer le lien et de le renvoyer aux demandes en attente, ou exceptionnellement à tous les bénéficiaires. Seuls les envois réussis sont marqués comme rediffusés.
 - Renoncer à un objectif conserve le solde d’invitations déjà validées. Lorsqu’un objectif consomme 20 invitations sur un solde de 21, le solde suivant vaut 1.
 
 ## Sécurité et limites Telegram
