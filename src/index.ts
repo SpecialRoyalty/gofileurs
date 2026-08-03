@@ -2102,24 +2102,21 @@ async function validatePending() {
     inviter_id: string;
     campaign_id: string | null;
   }>(
-    `SELECT id,invitee_id,inviter_id,campaign_id FROM invite_joins WHERE status='pending' AND validate_at<=now() LIMIT 100`,
+    `SELECT j.id,j.invitee_id,j.inviter_id,j.campaign_id
+     FROM invite_joins j
+     JOIN group_members gm ON gm.user_id=j.invitee_id
+     WHERE j.status='pending' AND j.validate_at<=now() AND gm.left_at IS NULL
+     ORDER BY j.validate_at
+     LIMIT 500`,
   );
   for (const r of rows) {
     try {
-      const m = await bot.telegram.getChatMember(
-        config.MAIN_GROUP_ID,
-        Number(r.invitee_id),
-      );
-      if (
-        !["member", "administrator", "creator", "restricted"].includes(m.status)
-      ) {
-        await db.query(`UPDATE invite_joins SET status='left' WHERE id=$1`, [
-          r.id,
-        ]);
-        continue;
-      }
       const q = await db.query(
-        `UPDATE invite_joins SET status='counted' WHERE id=$1 AND status='pending' RETURNING id`,
+        `UPDATE invite_joins j
+         SET status='counted'
+         WHERE j.id=$1 AND j.status='pending'
+           AND EXISTS(SELECT 1 FROM group_members gm WHERE gm.user_id=j.invitee_id AND gm.left_at IS NULL)
+         RETURNING id`,
         [r.id],
       );
       if (!q.rowCount) continue;
@@ -2244,7 +2241,10 @@ async function startup() {
       "my_chat_member",
     ],
   });
-  setInterval(validatePending, 30_000);
+  setInterval(
+    () => validatePending().catch((e) => console.error("validation worker", e)),
+    30_000,
+  );
   setInterval(
     () => publishNextAd().catch((e) => console.error("ad rotation", e)),
     60_000,
@@ -2255,6 +2255,7 @@ async function startup() {
     60_000,
   );
   await publishNextAd().catch((e) => console.error("ad startup", e));
+  await validatePending().catch((e) => console.error("validation startup", e));
   await reviewInactiveMembers().catch((e) =>
     console.error("inactive startup", e),
   );
