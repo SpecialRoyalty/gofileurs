@@ -2233,7 +2233,7 @@ async function startup() {
     can_pin_messages: false,
     can_manage_topics: false,
   });
-  await bot.launch({
+  const polling = bot.launch({
     allowedUpdates: [
       "message",
       "callback_query",
@@ -2260,6 +2260,7 @@ async function startup() {
     console.error("inactive startup", e),
   );
   console.log(`@${me.username} started`);
+  await polling;
 }
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
