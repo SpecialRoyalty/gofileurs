@@ -61,3 +61,5 @@ npm run dev
 ```
 
 Vérification : `npm run check` puis `npm run build`.
+
+Les workers de validation, publicités et contrôle des inactifs sont lancés en parallèle du polling Telegram. Ils exécutent aussi un premier passage immédiat au démarrage du conteneur.
